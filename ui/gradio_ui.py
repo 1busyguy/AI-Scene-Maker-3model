@@ -477,8 +477,7 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                     video_gen_params.update({
                         "duration": 5,  # Always force 5 seconds for LUMA Ray2
                         "aspect_ratio": model_params.get("aspect_ratio", "16:9"),
-                        "loop": False,  # Always disabled - causes workflow issues
-                        "use_end_image": False  # Disabled to prevent using last frame as end target
+                        "loop": False   # Always disabled - causes workflow issues
                     })
                     
                     # Use end image functionality is now disabled as it causes workflow issues
@@ -1063,8 +1062,7 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
             model_params = {
                 "duration": 5,  # Always force 5 seconds for LUMA Ray2
                 "aspect_ratio": luma_aspect_ratio,
-                "loop": False,  # Always disabled - causes workflow issues
-                "use_end_image": False  # Disabled to prevent using last frame as end target
+                "loop": False   # Always disabled - causes workflow issues
             }
         else:
             # WAN parameters (empty dict as defaults are used)
