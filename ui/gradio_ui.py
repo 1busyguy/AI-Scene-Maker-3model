@@ -473,15 +473,14 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                     if model_params.get("style"):
                         video_gen_params["style"] = model_params["style"]
                 elif selected_model == "luma":
-                    # Add LUMA-specific parameters
+                    # Add LUMA-specific parameters - keep only essential parameters to minimize API issues
                     video_gen_params.update({
                         "duration": 5,  # Always force 5 seconds for LUMA Ray2
-                        "aspect_ratio": model_params.get("aspect_ratio", "16:9"),
-                        "loop": False   # Always disabled - causes workflow issues
+                        "aspect_ratio": model_params.get("aspect_ratio", "16:9")
+                        # No loop parameter to avoid API issues
                     })
                     
-                    # Use end image functionality is now disabled as it causes workflow issues
-                    # This ensures each video is generated independently
+                    # No end image functionality - each video is generated independently
                 else:
                     # Add WAN-specific parameters
                     video_gen_params.update({
@@ -598,12 +597,21 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                 
             except Exception as e:
                 logger.exception(f"Error in chain {chain_number}")
-                if chain > 0:
+                error_msg = str(e)
+                
+                # Provide more helpful error messages for common issues
+                if "LUMA" in model_type and "400 Bad Request" in error_msg:
+                    yield "error", None, f"LUMA Ray2 API rejected the request. This could be due to prompt length, image content restrictions, or API changes. Try a different image or model."
+                    return
+                elif "quota" in error_msg.lower() or "limit" in error_msg.lower() or "credit" in error_msg.lower():
+                    yield "error", None, f"API quota exceeded. Please check your FAL.ai account limits."
+                    return
+                elif chain > 0:
                     # Return what we have so far if at least one chain was successful
-                    yield "error", None, f"Completed {chain} chains. Error in chain {chain_number}: {str(e)}"
+                    yield "error", None, f"Completed {chain} chains. Error in chain {chain_number}: {error_msg}"
                     return
                 else:
-                    yield "error", None, f"Error in first chain: {str(e)}"
+                    yield "error", None, f"Error in first chain: {error_msg}"
                     return
         
         # Stitch videos together
@@ -1058,11 +1066,11 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
                 "aspect_ratio": "16:9"  # Default for Pixverse
             }
         elif model_selection == "LUMA Ray2":
-            # LUMA-specific parameters
+            # LUMA-specific parameters - keep only essential parameters
             model_params = {
                 "duration": 5,  # Always force 5 seconds for LUMA Ray2
-                "aspect_ratio": luma_aspect_ratio,
-                "loop": False   # Always disabled - causes workflow issues
+                "aspect_ratio": luma_aspect_ratio
+                # No loop parameter to avoid API issues
             }
         else:
             # WAN parameters (empty dict as defaults are used)

@@ -78,23 +78,21 @@ def generate_video_from_image(prompt, image_url, resolution, num_frames=81, fps=
         start_image_filename = image_url.split('/')[-1] if image_url else "None"
         
         # Prepare request parameters for LUMA
+        # Ensure only the required parameters are included and formatted correctly
         request_params = {
             "prompt": prompt,
             "image_url": image_url,
             "resolution": resolution,
             "aspect_ratio": aspect_ratio,
             "duration": luma_duration,
-            "loop": loop
+            # Remove loop parameter if it's false as it might not be required
+            # Only include if explicitly set to true
         }
         
-        # Add end image if provided
-        if end_image_url:
-            end_image_filename = end_image_url.split('/')[-1] if end_image_url else "None"
-            request_params["end_image_url"] = end_image_url
-            logger.info(f"Using continuity: Starting with image {start_image_filename} and targeting end image {end_image_filename}")
-        else:
-            logger.info(f"Starting with image {start_image_filename} (no end target image provided)")
-            
+        # Only add loop parameter if it's True
+        if loop:
+            request_params["loop"] = True
+        
         # Log the parameters for debugging
         logger.info(f"LUMA parameters: {request_params}")
         
@@ -124,7 +122,21 @@ def generate_video_from_image(prompt, image_url, resolution, num_frames=81, fps=
             return video_url
             
         except Exception as e:
-            logger.exception(f"Error generating video with LUMA: {str(e)}")
+            error_msg = str(e)
+            logger.error(f"Error generating video with LUMA: {error_msg}")
+            
+            # Parse out useful information from the error
+            if "400 Bad Request" in error_msg:
+                logger.error("LUMA API rejected the request - likely an issue with parameters")
+                logger.error(f"Request parameters were: {request_params}")
+                
+                # Check common issues
+                if len(prompt) > 1000:
+                    logger.error(f"Prompt may be too long: {len(prompt)} characters")
+                
+                if not image_url or not image_url.startswith("http"):
+                    logger.error(f"Image URL appears invalid: {image_url}")
+            
             raise
         finally:
             # Restore original logging level
