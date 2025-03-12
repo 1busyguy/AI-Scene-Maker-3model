@@ -513,8 +513,8 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                 
                 # If not the last chain, extract best frame and trim video
                 if chain < num_chains - 1:
-                    yield "progress", base_progress + step_size * 0.8, "Finding highest quality frame and trimming video..."
-                    logger.info(f"Finding highest quality frame and trimming video for chain {chain_number}")
+                    yield "progress", base_progress + step_size * 0.8, "Finding highest quality frame for continuity..."
+                    logger.info(f"Finding highest quality frame for chain {chain_number}")
                     
                     # Extract best frame from last 10 frames and trim video to end at this frame
                     best_frame_path, trimmed_video_path = video_processing.extract_and_trim_best_frame(
@@ -527,6 +527,7 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                         logger.info(f"Video trimmed to end at highest quality frame: {os.path.basename(trimmed_video_path)}")
                         # Use trimmed video path instead of original
                         video_path = trimmed_video_path
+                        yield "progress", base_progress + step_size * 0.82, "Video trimmed to end at optimal frame for smoother transitions..."
                     
                     # Get structured analysis of the best frame
                     # This maintains the Theme and Main Subject while potentially updating Background and Tone/Color

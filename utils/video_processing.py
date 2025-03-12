@@ -13,14 +13,36 @@ logger = logging.getLogger(__name__)
 def is_ffmpeg_available():
     """Check if ffmpeg is available in the system."""
     try:
-        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # Try with subprocess.run
+        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2)
         return True
-    except Exception:
+    except (subprocess.SubprocessError, FileNotFoundError, PermissionError, OSError):
+        try:
+            # On Windows, check if ffmpeg.exe exists in current directory or PATH
+            import os
+            import platform
+            if platform.system() == "Windows":
+                # Check if ffmpeg exists in the current directory
+                if os.path.exists("ffmpeg.exe"):
+                    return True
+                
+                # Check system PATH
+                for path in os.environ["PATH"].split(os.pathsep):
+                    exe_path = os.path.join(path, "ffmpeg.exe")
+                    if os.path.exists(exe_path):
+                        return True
+                        
+        except Exception as e:
+            logger.debug(f"Error checking for ffmpeg: {str(e)}")
+        
+        logger.warning("FFmpeg not found. Some video processing features may be limited.")
         return False
 
 FFMPEG_AVAILABLE = is_ffmpeg_available()
-if not FFMPEG_AVAILABLE:
-    logger.warning("ffmpeg not found. Video concatenation may not work optimally.")
+if FFMPEG_AVAILABLE:
+    logger.info("FFmpeg found and available for video processing.")
+else:
+    logger.warning("ffmpeg not found. Video concatenation and trimming may not work properly.")
 
 def extract_best_frame(video_path, output_path=None):
     """
@@ -640,6 +662,8 @@ def extract_and_trim_best_frame(video_path, output_dir):
     scores = []
     positions = []
     
+    # Extract ALL frames from the last portion of the video
+    # This ensures we don't miss any good frames due to frame skipping
     for pos in range(start_frame, frame_count):
         cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
         ret, frame = cap.read()
@@ -665,11 +689,30 @@ def extract_and_trim_best_frame(video_path, output_dir):
         noise = np.mean(np.abs(gray.astype(np.float32) - blurred.astype(np.float32)))
         noise_score = 1.0 / (1.0 + noise)
         
+        # 5. Edge detection for strong visual elements (higher is better)
+        edges = cv2.Canny(gray, 100, 200)
+        edge_score = np.mean(edges) / 255.0  # Normalize to 0-1
+        
+        # 6. Motion blur detection (lower is better)
+        dx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        dy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        motion_blur_score = np.mean(np.sqrt(dx*dx + dy*dy))
+        motion_blur_score = min(1.0, motion_blur_score / 100.0)  # Normalize
+        
+        # Penalize frames near the very end which might be fading out
+        position_penalty = 1.0
+        if pos > frame_count - 3:  # Last 2 frames often fade out
+            position_penalty = 0.7
+        
         # Combined weighted score
-        score = (laplacian_var * 0.4 +  # Sharpness
-                contrast * 0.3 +         # Contrast
-                brightness_score * 0.2 +  # Balanced brightness
-                noise_score * 0.1)        # Low noise
+        score = position_penalty * (
+            laplacian_var * 0.3 +        # Sharpness
+            contrast * 0.2 +             # Contrast
+            brightness_score * 0.15 +    # Balanced brightness
+            noise_score * 0.1 +          # Low noise
+            edge_score * 0.15 +          # Strong edges for visual continuity
+            (1.0 - motion_blur_score) * 0.1  # Less motion blur
+        )
         
         frames.append(frame)
         scores.append(score)
@@ -691,17 +734,16 @@ def extract_and_trim_best_frame(video_path, output_dir):
     
     # If best frame isn't the last frame, trim the video
     if best_position < frame_count - 1:
-        # Calculate duration to keep (in seconds)
-        duration_to_keep = (best_position + 1) / fps
-        
-        logger.info(f"Trimming video to end at frame {best_position+1} (duration: {duration_to_keep:.2f}s)")
+        logger.info(f"Trimming video to end at frame {best_position+1} (position {best_position+1}/{frame_count})")
         
         # Use FFmpeg to trim the video
         if FFMPEG_AVAILABLE:
             cmd = [
                 "ffmpeg", "-y", "-i", video_path,
-                "-t", str(duration_to_keep),
+                "-vframes", str(best_position + 1),  # Number of frames to include (more precise than duration)
                 "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+                "-vsync", "vfr",  # Variable framerate to avoid frame duplication
+                "-copyts",  # Preserve timestamps
                 trimmed_video_path
             ]
             
@@ -713,7 +755,21 @@ def extract_and_trim_best_frame(video_path, output_dir):
                     stderr=subprocess.PIPE,
                     text=True
                 )
-                logger.info(f"Video trimmed successfully: {trimmed_video_path}")
+                # Verify the trimmed video file was created and has the correct frame count
+                if os.path.exists(trimmed_video_path):
+                    check_cap = cv2.VideoCapture(trimmed_video_path)
+                    trimmed_frame_count = int(check_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    check_cap.release()
+                    logger.info(f"Video trimmed successfully: {trimmed_video_path} (frames: {trimmed_frame_count}, original had {frame_count}, trimmed to frame {best_position+1})")
+                    
+                    # File size check
+                    orig_size = os.path.getsize(video_path) / (1024 * 1024)  # MB
+                    trimmed_size = os.path.getsize(trimmed_video_path) / (1024 * 1024)  # MB
+                    logger.info(f"Original video: {orig_size:.2f}MB, Trimmed video: {trimmed_size:.2f}MB")
+                else:
+                    logger.warning(f"Trimmed video file not found at {trimmed_video_path}")
+                    return best_frame_path, video_path
+                
                 return best_frame_path, trimmed_video_path
             except subprocess.CalledProcessError as e:
                 logger.warning(f"FFmpeg trimming failed: {e.stderr}, falling back to original video")

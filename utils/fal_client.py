@@ -74,6 +74,9 @@ def generate_video_from_image(prompt, image_url, resolution, num_frames=81, fps=
         # Convert duration from int to string format for LUMA
         luma_duration = f"{duration}s"
         
+        # Extract filename for easier identification in logs
+        start_image_filename = image_url.split('/')[-1] if image_url else "None"
+        
         # Prepare request parameters for LUMA
         request_params = {
             "prompt": prompt,
@@ -86,7 +89,11 @@ def generate_video_from_image(prompt, image_url, resolution, num_frames=81, fps=
         
         # Add end image if provided
         if end_image_url:
+            end_image_filename = end_image_url.split('/')[-1] if end_image_url else "None"
             request_params["end_image_url"] = end_image_url
+            logger.info(f"Using continuity: Starting with image {start_image_filename} and targeting end image {end_image_filename}")
+        else:
+            logger.info(f"Starting with image {start_image_filename} (no end target image provided)")
             
         # Log the parameters for debugging
         logger.info(f"LUMA parameters: {request_params}")
