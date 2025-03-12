@@ -68,6 +68,9 @@ def generate_video_from_image(prompt, image_url, resolution, num_frames=81, fps=
     if model == "luma":
         logger.info(f"Using LUMA Ray2 model with prompt: {prompt}")
         
+        # LUMA Ray2 only supports 5 seconds duration
+        duration = 5
+        
         # Convert duration from int to string format for LUMA
         luma_duration = f"{duration}s"
         

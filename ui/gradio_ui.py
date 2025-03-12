@@ -475,9 +475,10 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                 elif selected_model == "luma":
                     # Add LUMA-specific parameters
                     video_gen_params.update({
-                        "duration": model_params.get("duration", 5),
+                        "duration": 5,  # Always force 5 seconds for LUMA Ray2
                         "aspect_ratio": model_params.get("aspect_ratio", "16:9"),
-                        "loop": model_params.get("loop", False)
+                        "loop": model_params.get("loop", False),
+                        "use_end_image": model_params.get("use_end_image", True)
                     })
                     
                     # If not the first chain and use_end_image is enabled, use the previous best frame as end target
@@ -765,9 +766,10 @@ def create_ui():
                         with gr.Group(visible=False) as luma_options:
                             with gr.Row():
                                 luma_duration = gr.Dropdown(
-                                    choices=["5", "9"], 
+                                    choices=["5"], 
                                     value="5", 
-                                    label="Duration (seconds)"
+                                    label="Duration (seconds)",
+                                    info="LUMA Ray2 only supports 5 second duration"
                                 )
                                 luma_aspect_ratio = gr.Dropdown(
                                     choices=["16:9", "9:16", "4:3", "3:4", "21:9", "9:21"], 
@@ -1075,7 +1077,7 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
         elif model_selection == "LUMA Ray2":
             # LUMA-specific parameters
             model_params = {
-                "duration": int(luma_duration),
+                "duration": 5,  # Always force 5 seconds for LUMA Ray2
                 "aspect_ratio": luma_aspect_ratio,
                 "loop": luma_loop,
                 "use_end_image": luma_use_end_image
