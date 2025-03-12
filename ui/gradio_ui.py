@@ -477,21 +477,12 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                     video_gen_params.update({
                         "duration": 5,  # Always force 5 seconds for LUMA Ray2
                         "aspect_ratio": model_params.get("aspect_ratio", "16:9"),
-                        "loop": model_params.get("loop", False),
-                        "use_end_image": model_params.get("use_end_image", True)
+                        "loop": False,  # Always disabled - causes workflow issues
+                        "use_end_image": False  # Disabled to prevent using last frame as end target
                     })
                     
-                    # If not the first chain and use_end_image is enabled, use the previous best frame as end target
-                    if chain > 0 and model_params.get("use_end_image", True) and len(frame_paths) > 0:
-                        prev_best_frame = frame_paths[-1]
-                        # We need to upload this frame to FAL first
-                        yield "progress", base_progress + step_size * 0.35, "Uploading end target frame to FAL..."
-                        try:
-                            end_frame_url = fal_client.upload_file(prev_best_frame)
-                            logger.info(f"Uploaded end frame URL: {end_frame_url}")
-                            video_gen_params["end_image_url"] = end_frame_url
-                        except Exception as e:
-                            logger.warning(f"Could not upload end frame, continuing without it: {str(e)}")
+                    # Use end image functionality is now disabled as it causes workflow issues
+                    # This ensures each video is generated independently
                 else:
                     # Add WAN-specific parameters
                     video_gen_params.update({
@@ -781,18 +772,6 @@ def create_ui():
                                     value="16:9", 
                                     label="Aspect Ratio"
                                 )
-                            
-                            with gr.Row():
-                                luma_loop = gr.Checkbox(
-                                    label="Loop Video",
-                                    value=False,
-                                    info="Blend end with beginning for smooth looping"
-                                )
-                                luma_use_end_image = gr.Checkbox(
-                                    label="Use Last Frame as End Image",
-                                    value=True,
-                                    info="Use the last frame from previous chain as end target for next chain"
-                                )
                         
                         with gr.Row():
                             inference_steps = gr.Slider(
@@ -922,7 +901,7 @@ def create_ui():
                         gr.update(visible=True), gr.update(visible=False))
             elif model_choice == "LUMA Ray2":
                 return (gr.update(visible=False), gr.update(visible=False), gr.update(visible=True),
-                        gr.update(visible=False), gr.update(visible=True))
+                        gr.update(visible=False), gr.update(visible=False))
             else:  # WAN (Default)
                 return (gr.update(visible=True), gr.update(visible=False), gr.update(visible=False),
                         gr.update(visible=False), gr.update(visible=False))
@@ -962,7 +941,7 @@ def create_ui():
                 inference_steps, safety_checker, 
                 prompt_expansion, auto_determine, num_chains, 
                 seed, pixverse_duration, pixverse_style, pixverse_negative_prompt,
-                luma_duration, luma_aspect_ratio, luma_loop, luma_use_end_image,
+                luma_duration, luma_aspect_ratio,
                 generation_running, cancel_requested
             ],
             outputs=[
@@ -1034,7 +1013,7 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
                            model_selection, wan_res, pixverse_res, luma_res, steps, safety, expansion, 
                            auto_determine, chains, seed_val, pixverse_duration="5", 
                            pixverse_style="None", pixverse_negative_prompt="", 
-                           luma_duration="5", luma_aspect_ratio="16:9", luma_loop=False, luma_use_end_image=True,
+                           luma_duration="5", luma_aspect_ratio="16:9",
                            gen_running=False, cancel_req=False):
     """Handle the UI aspects of chain generation, including updating UI elements during generation"""
     # Update UI for generation start
@@ -1084,8 +1063,8 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
             model_params = {
                 "duration": 5,  # Always force 5 seconds for LUMA Ray2
                 "aspect_ratio": luma_aspect_ratio,
-                "loop": luma_loop,
-                "use_end_image": luma_use_end_image
+                "loop": False,  # Always disabled - causes workflow issues
+                "use_end_image": False  # Disabled to prevent using last frame as end target
             }
         else:
             # WAN parameters (empty dict as defaults are used)
