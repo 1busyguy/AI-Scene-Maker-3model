@@ -1,0 +1,10 @@
+gradio
+fal-client
+openai
+langchain
+langchain-openai
+moviepy
+opencv-python
+numpy
+Pillow
+python-dotenv
