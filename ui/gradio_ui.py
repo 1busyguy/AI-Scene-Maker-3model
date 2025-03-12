@@ -1419,46 +1419,34 @@ def enhance_final_video(video_path):
 def clear_session():
     """
     Reset the UI to start a fresh session, clearing all previous generation data.
+    Note: All generated files remain in the outputs directory for future reference.
     """
     import tempfile
-    import shutil
     import os
     
     logger.info("Clearing session and resetting UI for new composition")
+    logger.info("All previously generated files will remain in the outputs directory")
     
     try:
         # Clean up temporary files in the temp directory if they exist
-        # Only remove files that match our pattern to avoid deleting system files
+        # Only remove files that match our patterns and ONLY from the temp directory
+        # NEVER from the output directory
         temp_dir = tempfile.gettempdir()
         for filename in os.listdir(temp_dir):
-            if filename.startswith("temp_upload") or filename.startswith("adjusted_") or filename.startswith("story_generation_"):
+            if filename.startswith("temp_upload") or filename.startswith("adjusted_"):
                 try:
                     file_path = os.path.join(temp_dir, filename)
                     if os.path.isfile(file_path):
                         os.remove(file_path)
-                    elif os.path.isdir(file_path):
+                    elif os.path.isdir(file_path) and os.path.abspath(file_path).startswith(os.path.abspath(temp_dir)):
+                        # Extra safety check to ensure we're only deleting from temp dir
+                        import shutil
                         shutil.rmtree(file_path)
                 except Exception as e:
                     logger.warning(f"Failed to remove temporary file {filename}: {str(e)}")
         
-        # Clean up old output directories if there are more than 10
-        # This prevents disk space issues over time
-        if os.path.exists(OUTPUT_DIR):
-            output_dirs = [os.path.join(OUTPUT_DIR, d) for d in os.listdir(OUTPUT_DIR) 
-                          if os.path.isdir(os.path.join(OUTPUT_DIR, d)) and d.startswith("story_generation_")]
-            
-            # Sort by creation time (oldest first)
-            output_dirs.sort(key=lambda x: os.path.getctime(x))
-            
-            # Remove oldest directories if we have more than 10
-            max_dirs_to_keep = 10
-            if len(output_dirs) > max_dirs_to_keep:
-                for old_dir in output_dirs[:-max_dirs_to_keep]:
-                    try:
-                        shutil.rmtree(old_dir)
-                        logger.info(f"Removed old output directory: {old_dir}")
-                    except Exception as e:
-                        logger.warning(f"Failed to remove old output directory {old_dir}: {str(e)}")
+        # IMPORTANT: We do not delete any files in the output directory
+        # This ensures all generated content is preserved
                         
     except Exception as e:
         logger.warning(f"Error cleaning up files: {str(e)}")
@@ -1477,8 +1465,8 @@ def clear_session():
         "",  # scene_vision
         
         # Reset UI text elements
-        "Session cleared. Upload a new image to start.",  # generation_status
-        "Ready for a new composition.",  # output_status
+        "Session cleared. Upload a new image to start. All previously generated files remain in the outputs directory.",  # generation_status
+        "Ready for a new composition. Previous outputs are preserved.",  # output_status
         "",  # image_adjustment_info
         "",  # download_link
         
