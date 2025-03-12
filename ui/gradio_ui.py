@@ -507,7 +507,8 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                 
                 # Download the video
                 yield "progress", base_progress + step_size * 0.7, f"Downloading video for chain {chain_number}..."
-                video_path = os.path.join(session_dir, f"chain_{chain}.mp4")
+                # Using chain_number (1-indexed) in the filename instead of chain (0-indexed)
+                video_path = os.path.join(session_dir, f"chain_{chain_number:02d}.mp4")
                 fal_client.download_video(video_url, video_path)
                 # Don't append to video_paths yet - we'll append the trimmed version if applicable
                 
@@ -519,7 +520,7 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                     # Extract best frame from last 10 frames and trim video to end at this frame
                     best_frame_path, trimmed_video_path = video_processing.extract_and_trim_best_frame(
                         video_path,
-                        os.path.join(session_dir, f"chain_{chain}_processed")
+                        os.path.join(session_dir, f"chain_{chain_number:02d}_processed")
                     )
                     
                     # Use the trimmed video if available
@@ -528,6 +529,9 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                         # Use trimmed video path instead of original
                         video_path = trimmed_video_path
                         yield "progress", base_progress + step_size * 0.82, "Video trimmed to end at optimal frame for smoother transitions..."
+                        
+                        # Add a small pause to ensure file system operations are complete
+                        time.sleep(0.5)
                     
                     # Get structured analysis of the best frame
                     # This maintains the Theme and Main Subject while potentially updating Background and Tone/Color
@@ -599,7 +603,7 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                 # Now append the final video path (original or trimmed) to video_paths
                 video_paths.append(video_path)
                 
-                # Yield the complete chain with the 1-based chain number
+                # Yield the complete chain with the formatted chain number
                 yield "chain_complete", video_path, f"Chain {chain_number} completed"
                 
             except Exception as e:
@@ -1164,13 +1168,19 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
                 completed_chains += 1
                 chain_number = int(message.split()[1])  # Extract the chain number from the message "Chain X completed"
                 
-                # Store video path by chain number in dictionary
+                # Add a small pause to ensure all file operations are complete
+                time.sleep(0.5)
+                
+                # Store video path by chain number in dictionary (use chain_number directly)
                 chain_videos[chain_number] = result
                 video_paths.append(result)
                 
-                # Create sorted gallery items using the actual chain numbers
+                # Create sorted gallery items using the chain numbers (without subtraction)
                 sorted_chains = sorted(chain_videos.items())  # Sort by chain number
-                gallery_items = [(path, f"Chain {number-1}") for number, path in sorted_chains]
+                gallery_items = [(path, f"Chain {number:02d}") for number, path in sorted_chains]
+                
+                # Log what's being displayed in the gallery for debugging
+                logger.info(f"Gallery update - Items: {len(gallery_items)}, Chains: {[num for num, _ in sorted_chains]}")
                 
                 # Calculate elapsed time for this chain and ETA
                 chain_elapsed = time.time() - chain_start_time
@@ -1188,9 +1198,6 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
                     eta_text = f"Estimated time remaining: {format_time(remaining)}"
                 else:
                     eta_text = "Estimated time remaining: Calculating..."
-                
-                # Log what's being displayed in the gallery
-                logger.info(f"Gallery update - Chains: {', '.join([f'{num-1}' for num, _ in sorted_chains])}")
                 
                 yield (
                     gen_running, gallery_items, None, video_paths, final_path, 
