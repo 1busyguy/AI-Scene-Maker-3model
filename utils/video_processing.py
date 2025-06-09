@@ -5,6 +5,7 @@ import subprocess
 from moviepy.editor import concatenate_videoclips, VideoFileClip
 import numpy as np
 from PIL import Image, ImageEnhance
+import hashlib
 
 logging.basicConfig(level=logging.INFO, 
                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -616,8 +617,8 @@ def stitch_videos(video_paths, output_path):
 
 def extract_and_trim_best_frame(video_path, output_dir):
     """
-    Find the highest quality frame among the last 10 frames,
-    trim the video to end with this frame, and return the frame.
+    Extract a frame from the VERY END of the video for true progression continuity.
+    This prioritizes progression over quality to ensure seamless chain transitions.
     
     Args:
         video_path: Path to the video file
@@ -637,7 +638,7 @@ def extract_and_trim_best_frame(video_path, output_dir):
     best_frame_path = os.path.join(output_dir, f"{base_name}_best_frame.png")
     trimmed_video_path = os.path.join(output_dir, f"{base_name}_trimmed.mp4")
     
-    logger.info(f"Analyzing last 10 frames of video for highest quality: {video_path}")
+    logger.info(f"Extracting FINAL progression frame from video: {video_path}")
     
     # Open the video
     cap = cv2.VideoCapture(video_path)
@@ -647,100 +648,96 @@ def extract_and_trim_best_frame(video_path, output_dir):
     # Get video properties
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS)
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     
     if frame_count <= 0:
         raise ValueError(f"Video file has no frames: {video_path}")
     
-    # Determine frames to analyze (last 10 or fewer)
-    num_frames_to_analyze = min(10, frame_count)
-    start_frame = max(0, frame_count - num_frames_to_analyze)
+    # MODIFIED APPROACH: Extract from frames 5-8 before the very end to avoid padding/duplicate frames
+    # Many video encoders add padding frames at the absolute end
+    offset_from_end = 5  # Skip the last 5 frames which might be padding
+    num_frames_to_analyze = min(6, frame_count - offset_from_end)  # Analyze 6 frames before the offset
+    start_frame = max(0, frame_count - offset_from_end - num_frames_to_analyze)
+    end_frame = frame_count - offset_from_end
     
-    # Extract and score the last frames
+    logger.info(f"AVOIDING PADDING: Analyzing frames {start_frame}-{end_frame-1} (skipping last {offset_from_end} frames which might be padding)")
+    
+    # Extract the very last frames and pick the best progression frame
     frames = []
     scores = []
     positions = []
     
-    # Extract ALL frames from the last portion of the video
-    # This ensures we don't miss any good frames due to frame skipping
-    for pos in range(start_frame, frame_count):
+    for pos in range(start_frame, end_frame):
         cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
         ret, frame = cap.read()
         if not ret:
             continue
         
-        # Calculate quality score based on multiple metrics
+        # For progression, we prioritize TEMPORAL POSITION over quality
+        # The closer to the meaningful end, the better for continuity
+        temporal_weight = (pos - start_frame + 1) / num_frames_to_analyze
+        
+        # Basic quality metrics (but weighted much lower than temporal position)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        
-        # 1. Sharpness (Laplacian variance)
-        laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-        
-        # 2. Contrast (standard deviation)
-        _, std_dev = cv2.meanStdDev(gray)
+        laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()  # Sharpness
+        _, std_dev = cv2.meanStdDev(gray)  # Contrast
         contrast = std_dev[0][0]
         
-        # 3. Brightness score (penalize too dark or too bright)
+        # Brightness balance (avoid completely black or white frames)
         mean_val = cv2.mean(gray)[0]
         brightness_score = 1.0 - abs((mean_val - 127.5) / 127.5)
         
-        # 4. Noise estimation (lower is better)
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        noise = np.mean(np.abs(gray.astype(np.float32) - blurred.astype(np.float32)))
-        noise_score = 1.0 / (1.0 + noise)
+        # Frame difference score (prefer frames that are different from previous ones)
+        difference_score = 1.0  # Default score
+        if len(frames) > 0:  # Compare with previous frame
+            prev_gray = cv2.cvtColor(frames[-1], cv2.COLOR_BGR2GRAY)
+            frame_diff = cv2.absdiff(gray, prev_gray)
+            difference_score = np.mean(frame_diff) / 255.0  # Normalize to 0-1
         
-        # 5. Edge detection for strong visual elements (higher is better)
-        edges = cv2.Canny(gray, 100, 200)
-        edge_score = np.mean(edges) / 255.0  # Normalize to 0-1
-        
-        # 6. Motion blur detection (lower is better)
-        dx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-        dy = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-        motion_blur_score = np.mean(np.sqrt(dx*dx + dy*dy))
-        motion_blur_score = min(1.0, motion_blur_score / 100.0)  # Normalize
-        
-        # Penalize frames near the very end which might be fading out
-        position_penalty = 1.0
-        if pos > frame_count - 3:  # Last 2 frames often fade out
-            position_penalty = 0.7
-        
-        # Combined weighted score
-        score = position_penalty * (
-            laplacian_var * 0.3 +        # Sharpness
-            contrast * 0.2 +             # Contrast
-            brightness_score * 0.15 +    # Balanced brightness
-            noise_score * 0.1 +          # Low noise
-            edge_score * 0.15 +          # Strong edges for visual continuity
-            (1.0 - motion_blur_score) * 0.1  # Less motion blur
+        # HEAVILY weight temporal position for true progression
+        score = (
+            temporal_weight * 0.6 +          # 60% weight on being at the END
+            (laplacian_var / 1000) * 0.15 +  # 15% weight on sharpness  
+            (contrast / 100) * 0.1 +         # 10% weight on contrast
+            brightness_score * 0.05 +        # 5% weight on brightness balance
+            difference_score * 0.1           # 10% weight on being different from previous frame
         )
         
         frames.append(frame)
         scores.append(score)
         positions.append(pos)
+        
+        logger.info(f"Frame {pos}/{end_frame-1}: temporal_weight={temporal_weight:.2f}, diff_score={difference_score:.3f}, total_score={score:.3f}")
     
     cap.release()
     
     if not frames:
-        raise ValueError("Could not extract any frames for quality analysis")
+        raise ValueError("Could not extract any frames for progression analysis")
     
-    # Find best frame index and position
+    # Find the frame with highest progression score (should heavily favor the last frame)
     best_idx = scores.index(max(scores))
     best_position = positions[best_idx]
     best_frame = frames[best_idx]
     
-    # Save the best frame as PNG (lossless)
+    # Save the progression frame as PNG (lossless)
     cv2.imwrite(best_frame_path, best_frame, [cv2.IMWRITE_PNG_COMPRESSION, 0])
-    logger.info(f"Best frame saved to: {best_frame_path} (quality score: {scores[best_idx]:.2f}, position: {best_position}/{frame_count})")
+    logger.info(f"PROGRESSION frame saved: {best_frame_path} (score: {scores[best_idx]:.3f}, position: {best_position}/{frame_count-1}, avoiding last {offset_from_end} padding frames)")
+    logger.info(f">>> This frame represents the TRUE END STATE for seamless chain continuity <<<")
     
-    # If best frame isn't the last frame, trim the video
+    # Add debugging - compute hash of the extracted frame to verify uniqueness
+    with open(best_frame_path, 'rb') as f:
+        frame_hash = hashlib.md5(f.read()).hexdigest()
+    logger.info(f"EXTRACTED FRAME HASH: {frame_hash}")
+    logger.info(f"Frame file size: {os.path.getsize(best_frame_path)} bytes")
+    
+    # Always trim to the selected progression frame for consistency
     if best_position < frame_count - 1:
-        logger.info(f"Trimming video to end at frame {best_position+1} (position {best_position+1}/{frame_count})")
+        logger.info(f"Trimming video to end at progression frame {best_position+1} (position {best_position+1}/{frame_count})")
         
         # Use FFmpeg to trim the video
         if FFMPEG_AVAILABLE:
             cmd = [
                 "ffmpeg", "-y", "-i", video_path,
-                "-vframes", str(best_position + 1),  # Number of frames to include (more precise than duration)
+                "-vframes", str(best_position + 1),  # Include frames up to the progression frame
                 "-c:v", "libx264", "-preset", "medium", "-crf", "18",
                 "-vsync", "vfr",  # Variable framerate to avoid frame duplication
                 "-copyts",  # Preserve timestamps
@@ -755,28 +752,85 @@ def extract_and_trim_best_frame(video_path, output_dir):
                     stderr=subprocess.PIPE,
                     text=True
                 )
-                # Verify the trimmed video file was created and has the correct frame count
+                # Verify the trimmed video
                 if os.path.exists(trimmed_video_path):
                     check_cap = cv2.VideoCapture(trimmed_video_path)
                     trimmed_frame_count = int(check_cap.get(cv2.CAP_PROP_FRAME_COUNT))
                     check_cap.release()
-                    logger.info(f"Video trimmed successfully: {trimmed_video_path} (frames: {trimmed_frame_count}, original had {frame_count}, trimmed to frame {best_position+1})")
+                    logger.info(f"Video trimmed for progression: {trimmed_video_path} (frames: {trimmed_frame_count}, original: {frame_count})")
                     
-                    # File size check
+                    # File size info
                     orig_size = os.path.getsize(video_path) / (1024 * 1024)  # MB
                     trimmed_size = os.path.getsize(trimmed_video_path) / (1024 * 1024)  # MB
-                    logger.info(f"Original video: {orig_size:.2f}MB, Trimmed video: {trimmed_size:.2f}MB")
+                    logger.info(f"Original: {orig_size:.2f}MB → Trimmed: {trimmed_size:.2f}MB")
                 else:
-                    logger.warning(f"Trimmed video file not found at {trimmed_video_path}")
+                    logger.warning(f"Trimmed video not created, using original")
                     return best_frame_path, video_path
                 
                 return best_frame_path, trimmed_video_path
             except subprocess.CalledProcessError as e:
-                logger.warning(f"FFmpeg trimming failed: {e.stderr}, falling back to original video")
+                logger.warning(f"FFmpeg trimming failed: {e.stderr}, using original video")
                 return best_frame_path, video_path
         else:
-            logger.warning("FFmpeg not available for trimming, returning original video")
+            logger.warning("FFmpeg not available, using original video")
             return best_frame_path, video_path
     else:
-        logger.info("Best frame is already the last frame, no trimming needed")
+        logger.info("Progression frame is already the last frame")
         return best_frame_path, video_path
+
+def extract_simple_last_frame(video_path, output_dir):
+    """
+    Simple frame extraction that gets the exact last frame without any filtering.
+    This is a backup method in case the complex extraction is having issues.
+    
+    Args:
+        video_path: Path to the video file
+        output_dir: Directory to save outputs
+        
+    Returns:
+        tuple: (last_frame_path, original_video_path)
+    """
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"Video file not found: {video_path}")
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Setup paths
+    base_name = os.path.splitext(os.path.basename(video_path))[0]
+    last_frame_path = os.path.join(output_dir, f"{base_name}_last_frame.png")
+    
+    logger.info(f"SIMPLE EXTRACTION: Getting exact last frame from video: {video_path}")
+    
+    # Open the video
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Could not open video file: {video_path}")
+    
+    # Get video properties
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    
+    if frame_count <= 0:
+        raise ValueError(f"Video file has no frames: {video_path}")
+    
+    # Go to the absolute last frame
+    last_frame_index = frame_count - 1
+    cap.set(cv2.CAP_PROP_POS_FRAMES, last_frame_index)
+    ret, frame = cap.read()
+    cap.release()
+    
+    if not ret:
+        raise ValueError(f"Failed to read last frame from video: {video_path}")
+    
+    # Save the last frame as PNG (lossless)
+    cv2.imwrite(last_frame_path, frame, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+    logger.info(f"SIMPLE EXTRACTION: Last frame saved: {last_frame_path} (frame {last_frame_index}/{frame_count-1})")
+    
+    # Add debugging - compute hash of the extracted frame
+    with open(last_frame_path, 'rb') as f:
+        frame_hash = hashlib.md5(f.read()).hexdigest()
+    logger.info(f"SIMPLE EXTRACTION HASH: {frame_hash}")
+    logger.info(f"Frame file size: {os.path.getsize(last_frame_path)} bytes")
+    
+    # Return the frame path and the original video (no trimming for simple method)
+    return last_frame_path, video_path

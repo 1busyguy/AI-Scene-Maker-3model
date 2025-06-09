@@ -345,6 +345,13 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
         # Upload initial image to FAL.ai
         yield "progress", 0.2, "Uploading initial image..."
         try:
+            # Save original image hash for comparison throughout the chain
+            import hashlib
+            with open(image_path, 'rb') as f:
+                original_input_hash = hashlib.md5(f.read()).hexdigest()
+            logger.info(f"ORIGINAL INPUT IMAGE HASH: {original_input_hash}")
+            logger.info(f"This hash will be compared against all extracted frames to detect progression")
+            
             current_image_url = fal_client.upload_file(current_image_path)
             logger.info(f"Uploaded image URL: {current_image_url}")
         except Exception as e:
@@ -381,6 +388,9 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
             
             # Use 1-based chain numbers in messages for user display
             chain_number = chain + 1
+            
+            # CRITICAL DEBUG: Track current_image_url at the start of each chain
+            logger.info(f"🔍 CHAIN {chain_number} START: current_image_url = {current_image_url}")
             
             base_progress = 0.2 + (0.7 * chain / num_chains)
             step_size = 0.7 / num_chains
@@ -445,11 +455,41 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                 elif model_type == "LUMA Ray2":
                     selected_model = "luma"
                     model_display_name = "LUMA Ray2"
+                elif model_type == "Kling 2.1 PRO":
+                    selected_model = "kling"
+                    model_display_name = "Kling 2.1 PRO"
                 else:
                     model_display_name = "WAN"
                 
                 # Generate the video with FAL.ai
                 yield "progress", base_progress + step_size * 0.3, f"Generating video with {model_display_name} via FAL.ai..."
+                
+                # Log which image URL is being used for this chain
+                logger.info(f"Chain {chain_number} using image URL: {current_image_url}")
+                
+                # Save a debug copy of the frame being used (for visual verification)
+                if chain > 0:  # Not needed for first chain since we already have the original
+                    debug_frame_path = os.path.join(session_dir, f"debug_chain_{chain_number:02d}_input_frame.png")
+                    try:
+                        # Download the current image URL to a debug file
+                        import requests
+                        response = requests.get(current_image_url)
+                        with open(debug_frame_path, 'wb') as f:
+                            f.write(response.content)
+                        logger.info(f"Saved debug input frame for chain {chain_number}: {debug_frame_path}")
+                        
+                        # Add image hash for debugging - check if images are actually different
+                        import hashlib
+                        with open(debug_frame_path, 'rb') as f:
+                            image_hash = hashlib.md5(f.read()).hexdigest()
+                        logger.info(f"Chain {chain_number} input image hash: {image_hash}")
+                        
+                        # Also save the image size for debugging
+                        file_size = os.path.getsize(debug_frame_path)
+                        logger.info(f"Chain {chain_number} input image size: {file_size} bytes")
+                        
+                    except Exception as e:
+                        logger.warning(f"Could not save debug frame for chain {chain_number}: {str(e)}")
                 
                 # Common parameters for video generation
                 video_gen_params = {
@@ -481,6 +521,14 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                     })
                     
                     # No end image functionality - each video is generated independently
+                elif selected_model == "kling":
+                    # Add Kling 2.1 PRO specific parameters
+                    video_gen_params.update({
+                        "duration": model_params.get("duration", 5),
+                        "aspect_ratio": model_params.get("aspect_ratio", "16:9"),
+                        "negative_prompt": model_params.get("negative_prompt", ""),
+                        "creativity": model_params.get("creativity", 0.5)
+                    })
                 else:
                     # Add WAN-specific parameters
                     video_gen_params.update({
@@ -492,6 +540,17 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                     })
                 
                 # Call the video generation function
+                # CRITICAL DEBUG: Final check of what URL is being sent to FAL.ai
+                logger.info(f"🔍 ABOUT TO CALL VIDEO GENERATION with image_url: {video_gen_params['image_url']}")
+                logger.info(f"🔍 Current current_image_url variable: {current_image_url}")
+                
+                if video_gen_params['image_url'] != current_image_url:
+                    logger.error("🚨 CRITICAL BUG: video_gen_params['image_url'] != current_image_url!")
+                    logger.error(f"video_gen_params['image_url']: {video_gen_params['image_url']}")
+                    logger.error(f"current_image_url: {current_image_url}")
+                else:
+                    logger.info("✅ URL CONSISTENCY CONFIRMED: video_gen_params matches current_image_url")
+                
                 video_url = fal_client.generate_video_from_image(**video_gen_params)
                 
                 # Download the video
@@ -507,20 +566,16 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                     logger.info(f"Finding highest quality frame for chain {chain_number}")
                     
                     # Extract best frame from last 10 frames and trim video to end at this frame
-                    best_frame_path, trimmed_video_path = video_processing.extract_and_trim_best_frame(
+                    # TEMPORARILY USING SIMPLE EXTRACTION TO TEST
+                    logger.info("🔧 TESTING: Using simple frame extraction instead of complex method")
+                    best_frame_path, trimmed_video_path = video_processing.extract_simple_last_frame(
                         video_path,
                         os.path.join(session_dir, f"chain_{chain_number:02d}_processed")
                     )
                     
-                    # Use the trimmed video if available
-                    if trimmed_video_path != video_path and os.path.exists(trimmed_video_path):
-                        logger.info(f"Video trimmed to end at highest quality frame: {os.path.basename(trimmed_video_path)}")
-                        # Use trimmed video path instead of original
-                        video_path = trimmed_video_path
-                        yield "progress", base_progress + step_size * 0.82, "Video trimmed to end at optimal frame for smoother transitions..."
-                        
-                        # Add a small pause to ensure file system operations are complete
-                        time.sleep(0.5)
+                    # Skip trimmed video logic for simple extraction method
+                    # (Simple extraction doesn't do trimming, so video_path remains the same)
+                    logger.info("🔧 TESTING: Skipping video trimming for simple extraction method")
                     
                     # Get structured analysis of the best frame
                     # This maintains the Theme and Main Subject while potentially updating Background and Tone/Color
@@ -532,6 +587,11 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                         frame_desc = openai_client.image_to_text(best_frame_path)
                         frame_paths.append(best_frame_path)
                         logger.info(f"Got description for best frame: {frame_desc[:50]}...")
+                        
+                        # If OpenAI refuses to analyze the frame, use a generic description
+                        if "sorry" in frame_desc.lower() or "can't" in frame_desc.lower() or len(frame_desc) < 20:
+                            frame_desc = f"The best frame from chain {chain_number}, showing the progression of the {image_analysis['main_subject']} in the {image_analysis['background']} setting."
+                            logger.warning(f"OpenAI refused to analyze frame, using fallback description: {frame_desc}")
                         
                         # Now get structured analysis for continuity
                         frame_analysis = openai_client.analyze_image_structured(best_frame_path)
@@ -578,13 +638,113 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                     
                     # Upload the best frame for the next video
                     yield "progress", base_progress + step_size * 0.98, "Uploading best frame for next chain..."
-                    logger.info(f"Uploading best frame for next chain")
+                    logger.info(f"Uploading best frame for next chain: {best_frame_path}")
+                    
+                    # CRITICAL DEBUG: Compare extracted frame with original input
+                    import hashlib
                     try:
-                        current_image_url = fal_client.upload_file(best_frame_path)
+                        # Get hash of extracted frame
+                        with open(best_frame_path, 'rb') as f:
+                            extracted_hash = hashlib.md5(f.read()).hexdigest()
+                        
+                        logger.info(f"ORIGINAL INPUT HASH: {original_input_hash}")
+                        logger.info(f"EXTRACTED FRAME HASH: {extracted_hash}")
+                        
+                        if original_input_hash == extracted_hash:
+                            logger.error("🚨 CRITICAL ISSUE: Extracted frame is IDENTICAL to original input!")
+                            logger.error("This means the video didn't change from start to end - likely a Kling model issue")
+                            
+                            # Save a copy for verification
+                            verification_path = os.path.join(session_dir, f"IDENTICAL_FRAME_ISSUE_chain_{chain_number:02d}.png")
+                            import shutil
+                            shutil.copy2(best_frame_path, verification_path)
+                            logger.error(f"Saved identical frame copy for inspection: {verification_path}")
+                            
+                            # If this is Kling and we're getting identical frames, suggest alternatives
+                            if selected_model == "kling":
+                                logger.error("🚨 KLING MODEL ISSUE: Videos are not showing progression")
+                                logger.error("RECOMMENDATION: Try using LUMA Ray2 or Pixverse v3.5 instead")
+                                logger.error("This may be due to Kling not properly responding to input images or prompt content")
+                                
+                                # For now, continue with the identical frame but warn user
+                                yield "progress", base_progress + step_size * 0.97, "⚠️ Warning: No progression detected - consider switching models"
+                            
+                        else:
+                            logger.info("✅ GOOD: Extracted frame is DIFFERENT from original input")
+                            
+                            # Save a copy of the good progression frame for verification
+                            verification_path = os.path.join(session_dir, f"GOOD_PROGRESSION_chain_{chain_number:02d}.png")
+                            import shutil
+                            shutil.copy2(best_frame_path, verification_path)
+                            logger.info(f"Saved progression frame copy for verification: {verification_path}")
+                            
+                        # Also verify file sizes
+                        original_size = os.path.getsize(original_image_path)
+                        extracted_size = os.path.getsize(best_frame_path)
+                        logger.info(f"Original size: {original_size} bytes, Extracted size: {extracted_size} bytes")
+                        
+                    except Exception as e:
+                        logger.warning(f"Could not compare hashes: {str(e)}")
+                    
+                    try:
+                        new_image_url = fal_client.upload_file(best_frame_path)
+                        logger.info(f"Successfully uploaded best frame. New URL: {new_image_url}")
+                        logger.info(f"Previous URL was: {current_image_url}")
+                        
+                        # VERIFICATION: Download what we just uploaded and verify it's correct
+                        try:
+                            import requests
+                            verify_response = requests.get(new_image_url)
+                            verify_hash = hashlib.md5(verify_response.content).hexdigest()
+                            logger.info(f"VERIFICATION: Downloaded uploaded image hash: {verify_hash}")
+                            
+                            if verify_hash == extracted_hash:
+                                logger.info("✅ UPLOAD VERIFIED: FAL.ai is serving the correct extracted frame")
+                            else:
+                                logger.error("🚨 UPLOAD ISSUE: FAL.ai is serving different content than we uploaded!")
+                                
+                        except Exception as e:
+                            logger.warning(f"Could not verify upload: {str(e)}")
+                        
+                        # CRITICAL DEBUG: Track current_image_url update
+                        logger.info(f"🔍 BEFORE UPDATE: current_image_url = {current_image_url}")
+                        logger.info(f"🔍 NEW URL TO SET: new_image_url = {new_image_url}")
+                        
+                        current_image_url = new_image_url
+                        
+                        logger.info(f"🔍 AFTER UPDATE: current_image_url = {current_image_url}")
+                        logger.info(f"✅ Updated current_image_url for next chain: {current_image_url}")
+                        
+                        # Double-check the variable was actually updated
+                        if current_image_url == new_image_url:
+                            logger.info("✅ VARIABLE UPDATE CONFIRMED: current_image_url successfully updated")
+                        else:
+                            logger.error("🚨 VARIABLE UPDATE FAILED: current_image_url was not updated correctly!")
+                            logger.error(f"Expected: {new_image_url}")
+                            logger.error(f"Actual: {current_image_url}")
                     except Exception as e:
                         logger.exception(f"Error uploading frame, trying alternative method")
                         try:
-                            current_image_url = fal_client.upload_file_alternative(best_frame_path)
+                            new_image_url = fal_client.upload_file_alternative(best_frame_path)
+                            logger.info(f"Successfully uploaded best frame via alternative method. New URL: {new_image_url}")
+                            logger.info(f"Previous URL was: {current_image_url}")
+                            
+                            # CRITICAL DEBUG: Track current_image_url update for alternative method
+                            logger.info(f"🔍 ALTERNATIVE BEFORE UPDATE: current_image_url = {current_image_url}")
+                            logger.info(f"🔍 ALTERNATIVE NEW URL TO SET: new_image_url = {new_image_url}")
+                            
+                            current_image_url = new_image_url
+                            
+                            logger.info(f"🔍 ALTERNATIVE AFTER UPDATE: current_image_url = {current_image_url}")
+                            logger.info(f"✅ Updated current_image_url for next chain via alternative method: {current_image_url}")
+                            
+                            # Double-check the variable was actually updated
+                            if current_image_url == new_image_url:
+                                logger.info("✅ ALTERNATIVE VARIABLE UPDATE CONFIRMED: current_image_url successfully updated")
+                            else:
+                                logger.error("🚨 ALTERNATIVE VARIABLE UPDATE FAILED: current_image_url was not updated correctly!")
+                                logger.error(f"Expected: {new_image_url}")
+                                logger.error(f"Actual: {current_image_url}")
                         except Exception:
                             logger.exception(f"Both upload methods failed")
                             raise e
@@ -600,7 +760,10 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                 error_msg = str(e)
                 
                 # Provide more helpful error messages for common issues
-                if "LUMA" in model_type and "400 Bad Request" in error_msg:
+                if "Kling" in model_type and "400 Bad Request" in error_msg:
+                    yield "error", None, f"Kling 2.1 PRO API rejected the request. This could be due to prompt content, image restrictions, or API changes. Try a different image or model."
+                    return
+                elif "LUMA" in model_type and "400 Bad Request" in error_msg:
                     yield "error", None, f"LUMA Ray2 API rejected the request. This could be due to prompt length, image content restrictions, or API changes. Try a different image or model."
                     return
                 elif "quota" in error_msg.lower() or "limit" in error_msg.lower() or "credit" in error_msg.lower():
@@ -715,7 +878,7 @@ def create_ui():
                         
                         with gr.Row():
                             model_type = gr.Dropdown(
-                                choices=["WAN (Default)", "Pixverse v3.5", "LUMA Ray2"], 
+                                choices=["WAN (Default)", "Pixverse v3.5", "LUMA Ray2", "Kling 2.1 PRO"], 
                                 value="WAN (Default)", 
                                 label="Model"
                             )
@@ -743,6 +906,14 @@ def create_ui():
                                 label="Resolution",
                                 visible=False
                             )
+                            
+                            # Kling resolution options (720p, 1080p)
+                            kling_resolution = gr.Dropdown(
+                                choices=["720p", "1080p"], 
+                                value="720p", 
+                                label="Resolution",
+                                visible=False
+                            )
                         
                         # Pixverse-specific options group
                         with gr.Group(visible=False) as pixverse_options:
@@ -761,7 +932,7 @@ def create_ui():
                             pixverse_negative_prompt = gr.Textbox(
                                 label="Negative Prompt", 
                                 placeholder="Enter negative terms to exclude from generation",
-                                value="blurry, low quality, low resolution",
+                                value="cartoon, anime, illustration, drawing, painting, 3d, cgi, render, fake, doll, plastic, mannequin, unrealistic eyes, lowres, deformed, glitch, artifact, bad anatomy, bad proportions, blurry, grainy, oversaturated, oversharpened, watermark, signature, text, frame, border, overexposed, underexposed, unnatural lighting",
                                 lines=2
                             )
                             
@@ -779,6 +950,37 @@ def create_ui():
                                     value="16:9", 
                                     label="Aspect Ratio"
                                 )
+                        
+                        # Kling 2.1 PRO specific options group
+                        with gr.Group(visible=False) as kling_options:
+                            with gr.Row():
+                                kling_duration = gr.Dropdown(
+                                    choices=["5", "10"], 
+                                    value="5", 
+                                    label="Duration (seconds)",
+                                    info="Kling 2.1 PRO supports 5 or 10 second duration"
+                                )
+                                kling_aspect_ratio = gr.Dropdown(
+                                    choices=["16:9", "9:16", "1:1"], 
+                                    value="16:9", 
+                                    label="Aspect Ratio"
+                                )
+                            
+                            kling_negative_prompt = gr.Textbox(
+                                label="Negative Prompt", 
+                                placeholder="Enter negative terms to exclude from generation",
+                                value="cartoon, anime, illustration, drawing, painting, 3d, cgi, render, fake, doll, plastic, mannequin, extra fingers, extra limbs, mutated hands, fused fingers, distorted face, poorly drawn hands, unrealistic eyes, lowres, deformed, glitch, artifact, bad anatomy, bad proportions, blurry, grainy, oversaturated, oversharpened, watermark, signature, text, frame, border, overexposed, underexposed, unnatural lighting",
+                                lines=2
+                            )
+                            
+                            kling_creativity = gr.Slider(
+                                minimum=0.0,
+                                maximum=1.0,
+                                value=0.5,
+                                step=0.1,
+                                label="Creativity Level",
+                                info="Higher values = more creative/unexpected results"
+                            )
                         
                         with gr.Row():
                             inference_steps = gr.Slider(
@@ -904,19 +1106,66 @@ def create_ui():
         # Toggle model-specific options based on model selection
         def update_model_options(model_choice):
             if model_choice == "Pixverse v3.5":
-                return (gr.update(visible=False), gr.update(visible=True), gr.update(visible=False),
-                        gr.update(visible=True), gr.update(visible=False))
+                return (
+                    gr.update(visible=False),  # wan_resolution
+                    gr.update(visible=True),   # pixverse_resolution
+                    gr.update(visible=False),  # luma_resolution
+                    gr.update(visible=False),  # kling_resolution
+                    gr.update(visible=True),   # pixverse_options
+                    gr.update(visible=False),  # luma_options
+                    gr.update(visible=False),  # kling_options
+                    gr.update(visible=False),  # inference_steps (WAN only)
+                    gr.update(visible=False),  # safety_checker (WAN only)
+                    gr.update(visible=False)   # prompt_expansion (WAN only)
+                )
             elif model_choice == "LUMA Ray2":
-                return (gr.update(visible=False), gr.update(visible=False), gr.update(visible=True),
-                        gr.update(visible=False), gr.update(visible=False))
+                return (
+                    gr.update(visible=False),  # wan_resolution
+                    gr.update(visible=False),  # pixverse_resolution
+                    gr.update(visible=True),   # luma_resolution
+                    gr.update(visible=False),  # kling_resolution
+                    gr.update(visible=False),  # pixverse_options
+                    gr.update(visible=True),   # luma_options
+                    gr.update(visible=False),  # kling_options
+                    gr.update(visible=False),  # inference_steps (WAN only)
+                    gr.update(visible=False),  # safety_checker (WAN only)
+                    gr.update(visible=False)   # prompt_expansion (WAN only)
+                )
+            elif model_choice == "Kling 2.1 PRO":
+                return (
+                    gr.update(visible=False),  # wan_resolution
+                    gr.update(visible=False),  # pixverse_resolution
+                    gr.update(visible=False),  # luma_resolution
+                    gr.update(visible=True),   # kling_resolution
+                    gr.update(visible=False),  # pixverse_options
+                    gr.update(visible=False),  # luma_options
+                    gr.update(visible=True),   # kling_options
+                    gr.update(visible=False),  # inference_steps (WAN only)
+                    gr.update(visible=False),  # safety_checker (WAN only)
+                    gr.update(visible=False)   # prompt_expansion (WAN only)
+                )
             else:  # WAN (Default)
-                return (gr.update(visible=True), gr.update(visible=False), gr.update(visible=False),
-                        gr.update(visible=False), gr.update(visible=False))
+                return (
+                    gr.update(visible=True),   # wan_resolution
+                    gr.update(visible=False),  # pixverse_resolution
+                    gr.update(visible=False),  # luma_resolution
+                    gr.update(visible=False),  # kling_resolution
+                    gr.update(visible=False),  # pixverse_options
+                    gr.update(visible=False),  # luma_options
+                    gr.update(visible=False),  # kling_options
+                    gr.update(visible=True),   # inference_steps (WAN only)
+                    gr.update(visible=True),   # safety_checker (WAN only)
+                    gr.update(visible=True)    # prompt_expansion (WAN only)
+                )
                 
         model_type.change(
             fn=update_model_options,
             inputs=[model_type],
-            outputs=[wan_resolution, pixverse_resolution, luma_resolution, pixverse_options, luma_options]
+            outputs=[
+                wan_resolution, pixverse_resolution, luma_resolution, kling_resolution,
+                pixverse_options, luma_options, kling_options,
+                inference_steps, safety_checker, prompt_expansion
+            ]
         )
 
         # Connect auto-chain toggle to disable/enable chain slider
@@ -927,11 +1176,13 @@ def create_ui():
         )
 
         # Function to get the appropriate resolution based on model selection
-        def get_resolution(model_choice, wan_res, pixverse_res, luma_res):
+        def get_resolution(model_choice, wan_res, pixverse_res, luma_res, kling_res):
             if model_choice == "Pixverse v3.5":
                 return pixverse_res
             elif model_choice == "LUMA Ray2":
                 return luma_res
+            elif model_choice == "Kling 2.1 PRO":
+                return kling_res
             else:
                 return wan_res
 
@@ -944,11 +1195,13 @@ def create_ui():
                 # We need to select the appropriate resolution based on model
                 # This will be handled inside the function
                 model_type,  # We'll check this first to determine which resolution to use
-                wan_resolution, pixverse_resolution, luma_resolution,
+                wan_resolution, pixverse_resolution, luma_resolution, kling_resolution,
                 inference_steps, safety_checker, 
                 prompt_expansion, auto_determine, num_chains, 
                 seed, pixverse_duration, pixverse_style, pixverse_negative_prompt,
                 luma_duration, luma_aspect_ratio,
+                # Add Kling parameters here:
+                kling_duration, kling_aspect_ratio, kling_negative_prompt, kling_creativity,
                 generation_running, cancel_requested
             ],
             outputs=[
@@ -1017,10 +1270,12 @@ def toggle_chains(auto):
     return gr.update(interactive=not auto)
 
 def ui_start_chain_generation(action_dir, img, theme, background, main_subject, tone_color, vision, 
-                           model_selection, wan_res, pixverse_res, luma_res, steps, safety, expansion, 
+                           model_selection, wan_res, pixverse_res, luma_res, kling_res, steps, safety, expansion, 
                            auto_determine, chains, seed_val, pixverse_duration="5", 
                            pixverse_style="None", pixverse_negative_prompt="", 
                            luma_duration="5", luma_aspect_ratio="16:9",
+                           # Add Kling parameters:
+                           kling_duration="5", kling_aspect_ratio="16:9", kling_negative_prompt="", kling_creativity=0.5,
                            gen_running=False, cancel_req=False):
     """Handle the UI aspects of chain generation, including updating UI elements during generation"""
     # Update UI for generation start
@@ -1040,6 +1295,8 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
         resolution = pixverse_res
     elif model_selection == "LUMA Ray2":
         resolution = luma_res
+    elif model_selection == "Kling 2.1 PRO":
+        resolution = kling_res
     else:
         resolution = wan_res
     
@@ -1071,6 +1328,14 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
                 "duration": 5,  # Always force 5 seconds for LUMA Ray2
                 "aspect_ratio": luma_aspect_ratio
                 # No loop parameter to avoid API issues
+            }
+        elif model_selection == "Kling 2.1 PRO":
+            # Kling 2.1 PRO specific parameters
+            model_params = {
+                "duration": int(kling_duration),
+                "aspect_ratio": kling_aspect_ratio,
+                "negative_prompt": kling_negative_prompt,
+                "creativity": kling_creativity
             }
         else:
             # WAN parameters (empty dict as defaults are used)
