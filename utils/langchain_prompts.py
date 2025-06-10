@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 # Initialize model with API key
 llm = ChatOpenAI(
-    model="gpt-4o-mini",
+    model="gpt-4.1-mini",
     temperature=0.7
 )
 
