@@ -482,11 +482,9 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                             prompt_gen = CharacterLockedPromptGenerator()
                             prompt_gen.set_character_description(character_description)
                             
-                            consistency_negative = prompt_gen.create_negative_prompt()
-                            if model_params.get("negative_prompt"):
-                                model_params["negative_prompt"] += ", " + consistency_negative
-                            else:
-                                model_params["negative_prompt"] = consistency_negative
+                            # Pass existing negative prompt to avoid duplication
+                            existing_negative = model_params.get("negative_prompt", "")
+                            model_params["negative_prompt"] = prompt_gen.create_negative_prompt(existing_negative)
                         
                         logger.info(f"Generated character-locked prompt: {cinematic_prompt}")
                         

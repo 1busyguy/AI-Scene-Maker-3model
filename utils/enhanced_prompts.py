@@ -304,32 +304,57 @@ Transition Prompt:"""
         
         return modifiers
     
-    def create_negative_prompt(self) -> str:
+    def create_negative_prompt(self, existing_negative: str = "") -> str:
         """Create a negative prompt to prevent character changes"""
         
+        # Core character consistency negatives (shorter list)
         negative_elements = [
             "different person",
-            "changed appearance",
+            "changed appearance", 
             "different clothes",
             "altered features",
-            "different hair",
-            "changed face",
-            "different body type",
-            "inconsistent character",
-            "morphing features",
-            "shifting appearance"
+            "inconsistent character"
         ]
         
-        # Add specific negatives based on character
+        # Add specific negatives based on character (but keep it short)
         if self.character_description:
             if 'hair_color' in str(self.character_description):
-                # Add opposite hair colors to negative
+                # Add only one opposite hair color to keep it concise
                 if 'blonde' in str(self.character_description).lower():
-                    negative_elements.extend(["dark hair", "brown hair", "black hair"])
+                    negative_elements.append("dark hair")
                 elif 'dark' in str(self.character_description).lower():
-                    negative_elements.extend(["blonde hair", "light hair", "red hair"])
+                    negative_elements.append("blonde hair")
         
-        return ", ".join(negative_elements)
+        # Create the character consistency negative prompt
+        character_negative = ", ".join(negative_elements)
+        
+        # Combine with existing negative prompt, avoiding duplicates
+        if existing_negative:
+            # Split existing negative into individual terms
+            existing_terms = [term.strip() for term in existing_negative.split(",")]
+            new_terms = [term.strip() for term in character_negative.split(",")]
+            
+            # Only add terms that aren't already present
+            unique_new_terms = [term for term in new_terms if term not in existing_terms]
+            
+            if unique_new_terms:
+                combined = existing_negative + ", " + ", ".join(unique_new_terms)
+            else:
+                combined = existing_negative
+            
+            # Ensure the total length doesn't exceed 500 characters
+            if len(combined) > 500:
+                # Keep existing and add only the most important character terms
+                essential_terms = ["different person", "changed appearance", "inconsistent character"]
+                available_terms = [term for term in essential_terms if term not in existing_negative]
+                if available_terms:
+                    combined = existing_negative + ", " + ", ".join(available_terms[:2])
+                else:
+                    combined = existing_negative
+            
+            return combined
+        else:
+            return character_negative
 
 
 # Integration with existing langchain_prompts.py
