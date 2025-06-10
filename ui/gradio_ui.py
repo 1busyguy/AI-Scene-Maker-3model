@@ -175,7 +175,11 @@ def save_api_keys(openai_key, fal_key):
 def start_chain_generation_with_updates(action_direction, image, theme=None, background=None, main_subject=None, 
                                        tone_and_color=None, scene_vision=None, resolution="720p", 
                                        inference_steps=40, safety_checker=False, prompt_expansion=True, 
-                                       num_chains=3, seed=-1, model_type="WAN (Default)", model_params=None, cancel_requested=lambda: False):
+                                       num_chains=3, seed=-1, model_type="WAN (Default)", model_params=None, 
+                                       cancel_requested=lambda: False,
+                                       # New parameters
+                                       enable_character_consistency=True,
+                                       enable_face_enhancement=True):
     """
     Generate a series of AI-generated videos with updates for the gradio UI
     Returns a generator that yields (update_type, data, message)
@@ -265,6 +269,39 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
             # Update action direction to indicate adjustment
             if 'action_direction' in image_analysis and image_analysis['action_direction']:
                 image_analysis['action_direction'] = f"{image_analysis['action_direction']} (Note: Image was automatically adjusted: {', '.join(adjustments)})"
+        
+        # Initialize character consistency manager and face enhancement
+        character_manager = None
+        face_enhancer = None
+        character_description = None
+        
+        if enable_character_consistency:
+            yield "progress", 0.08, "Initializing character consistency manager..."
+            try:
+                from utils.character_consistency import CharacterConsistencyManager
+                # Initialize character consistency manager
+                character_manager = CharacterConsistencyManager(image_path, session_dir)
+                character_description = character_manager.generate_character_description()
+                logger.info(f"Character profile created: {character_description}")
+            except Exception as e:
+                logger.error(f"Failed to initialize character consistency: {str(e)}")
+                character_manager = None
+                enable_character_consistency = False
+        
+        if enable_face_enhancement:
+            yield "progress", 0.09, "Initializing face enhancement..."
+            try:
+                from utils.face_enhancement import FaceEnhancer
+                face_enhancer = FaceEnhancer()
+                # Enhance the input image
+                enhanced_input = face_enhancer.enhance_face(image_path)
+                if enhanced_input != image_path:
+                    image_path = enhanced_input
+                    logger.info("Input image face enhanced")
+            except Exception as e:
+                logger.error(f"Failed to initialize face enhancement: {str(e)}")
+                face_enhancer = None
+                enable_face_enhancement = False
         
         # Get structured image analysis if any component is missing
         yield "progress", 0.1, "Analyzing image..."
@@ -414,28 +451,67 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                 # Determine chain-specific parameters
                 chain_specific_vision = scene_vision
                 
-                # Generate cinematic prompt using LangChain
+                # Generate cinematic prompt using LangChain with character consistency
                 try:
-                    yield "progress", base_progress + step_size * 0.2, "Generating cinematic prompt with LangChain..."
-                    logger.info("=== Starting LangChain reasoning process for prompt generation ===")
-                    logger.info(f"Story Phase: {chain_number}/{num_chains} ({int((chain / num_chains) * 100)}% complete)")
-                    logger.info("Analyzing scene components for continuity...")
-                    
-                    cinematic_prompt = generate_cinematic_prompt(
-                        action_direction=image_analysis['action_direction'],
-                        scene_vision=chain_specific_vision,
-                        frame_description=frame_desc,
-                        image_description=image_description,
-                        theme=image_analysis['theme'],
-                        background=image_analysis['background'],
-                        main_subject=image_analysis['main_subject'],
-                        tone_and_color=image_analysis['tone_and_color'],
-                        current_chain=chain,
-                        total_chains=num_chains
-                    )
-                    logger.info(f"Generated cinematic prompt: {cinematic_prompt}")
+                    if enable_character_consistency and character_manager:
+                        yield "progress", base_progress + step_size * 0.2, "Generating character-locked prompt..."
+                        logger.info("=== Using Character-Locked Prompt Generation ===")
+                        logger.info(f"Story Phase: {chain_number}/{num_chains} ({int((chain / num_chains) * 100)}% complete)")
+                        logger.info("Analyzing scene components for character consistency...")
+                        
+                        # Use enhanced prompt generation
+                        from utils.enhanced_prompts import generate_character_locked_cinematic_prompt
+                        
+                        cinematic_prompt = generate_character_locked_cinematic_prompt(
+                            action_direction=image_analysis['action_direction'],
+                            scene_vision=chain_specific_vision,
+                            frame_description=frame_desc,
+                            image_description=image_description,
+                            theme=image_analysis['theme'],
+                            background=image_analysis['background'],
+                            main_subject=image_analysis['main_subject'],
+                            tone_and_color=image_analysis['tone_and_color'],
+                            current_chain=chain,
+                            total_chains=num_chains,
+                            character_manager=character_manager
+                        )
+                        
+                        # Add negative prompt for character consistency
+                        if model_type in ["Pixverse v3.5", "Kling 2.1 PRO"]:
+                            from utils.enhanced_prompts import CharacterLockedPromptGenerator
+                            prompt_gen = CharacterLockedPromptGenerator()
+                            prompt_gen.set_character_description(character_description)
+                            
+                            consistency_negative = prompt_gen.create_negative_prompt()
+                            if model_params.get("negative_prompt"):
+                                model_params["negative_prompt"] += ", " + consistency_negative
+                            else:
+                                model_params["negative_prompt"] = consistency_negative
+                        
+                        logger.info(f"Generated character-locked prompt: {cinematic_prompt}")
+                        
+                    else:
+                        yield "progress", base_progress + step_size * 0.2, "Generating cinematic prompt with LangChain..."
+                        logger.info("=== Starting LangChain reasoning process for prompt generation ===")
+                        logger.info(f"Story Phase: {chain_number}/{num_chains} ({int((chain / num_chains) * 100)}% complete)")
+                        logger.info("Analyzing scene components for continuity...")
+                        
+                        cinematic_prompt = generate_cinematic_prompt(
+                            action_direction=image_analysis['action_direction'],
+                            scene_vision=chain_specific_vision,
+                            frame_description=frame_desc,
+                            image_description=image_description,
+                            theme=image_analysis['theme'],
+                            background=image_analysis['background'],
+                            main_subject=image_analysis['main_subject'],
+                            tone_and_color=image_analysis['tone_and_color'],
+                            current_chain=chain,
+                            total_chains=num_chains
+                        )
+                        logger.info(f"Generated cinematic prompt: {cinematic_prompt}")
+                        
                 except Exception as e:
-                    logger.exception("Error using LangChain for prompt generation, falling back")
+                    logger.exception("Error with character-locked prompt generation, falling back")
                     cinematic_prompt = f"Continue the scene with {image_analysis['main_subject']} in the {image_analysis['background']}, showing {image_analysis['action_direction']}."
                 
                 # Save the prompt for later use
@@ -577,6 +653,23 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                     # (Simple extraction doesn't do trimming, so video_path remains the same)
                     logger.info("🔧 TESTING: Skipping video trimming for simple extraction method")
                     
+                    # Validate character consistency
+                    if enable_character_consistency and character_manager:
+                        try:
+                            yield "progress", base_progress + step_size * 0.85, "Validating character consistency..."
+                            score, validation = character_manager.validate_character_consistency(best_frame_path)
+                            
+                            if score < 0.6:  # Low consistency
+                                logger.warning(f"Low character consistency detected: {score}")
+                                yield "progress", base_progress + step_size * 0.87, 
+                                      f"⚠️ Character consistency: {score:.2f} - may need regeneration"
+                            else:
+                                logger.info(f"Good character consistency: {score}")
+                                yield "progress", base_progress + step_size * 0.87, 
+                                      f"✅ Character consistency: {score:.2f}"
+                        except Exception as e:
+                            logger.error(f"Error validating consistency: {str(e)}")
+                    
                     # Get structured analysis of the best frame
                     # This maintains the Theme and Main Subject while potentially updating Background and Tone/Color
                     try:
@@ -635,6 +728,17 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                     except Exception as e:
                         logger.exception(f"Error updating action direction")
                         # Keep existing action direction if this fails
+                    
+                    # Enhance face for better consistency
+                    if enable_face_enhancement and face_enhancer and best_frame_path:
+                        try:
+                            yield "progress", base_progress + step_size * 0.92, "Enhancing face for consistency..."
+                            enhanced_frame = face_enhancer.enhance_face(best_frame_path)
+                            if enhanced_frame != best_frame_path:
+                                best_frame_path = enhanced_frame
+                                logger.info("Frame face enhanced for better consistency")
+                        except Exception as e:
+                            logger.error(f"Error enhancing frame: {str(e)}")
                     
                     # Upload the best frame for the next video
                     yield "progress", base_progress + step_size * 0.98, "Uploading best frame for next chain..."
@@ -777,6 +881,21 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                     yield "error", None, f"Error in first chain: {error_msg}"
                     return
         
+        # Create character consistency report before finalizing
+        consistency_msg = ""
+        if enable_character_consistency and character_manager:
+            try:
+                yield "progress", 0.93, "Creating character consistency report..."
+                report = character_manager.create_validation_report(video_paths)
+                logger.info(f"Character consistency report: Average score = {report['average_consistency']:.2f}")
+                
+                # Add to output status
+                consistency_msg = f" | Character Consistency: {report['average_consistency']:.2f}/1.0"
+                if report['failed_frames']:
+                    consistency_msg += f" ({len(report['failed_frames'])} videos need attention)"
+            except Exception as e:
+                logger.error(f"Error creating consistency report: {str(e)}")
+        
         # Stitch videos together
         yield "progress", 0.95, "Stitching videos together..."
         try:
@@ -784,11 +903,11 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
             logger.info(f"Stitching videos to create final video: {final_video_path}")
             video_processing.stitch_videos(video_paths, final_video_path)
             logger.info(f"Completed story generation")
-            yield "final", final_video_path, "Story generation completed successfully!"
+            yield "final", final_video_path, f"Story generation completed successfully!{consistency_msg}"
         except Exception as e:
             logger.exception("Error stitching videos")
             # Return the individual videos even if stitching failed
-            yield "videos", video_paths, f"Videos generated but could not be stitched together: {str(e)}"
+            yield "videos", video_paths, f"Videos generated but could not be stitched together: {str(e)}{consistency_msg}"
     
     except Exception as e:
         logger.exception(f"Error in chain generation: {str(e)}")
@@ -1007,6 +1126,19 @@ def create_ui():
                             
                         seed = gr.Number(label="Seed (-1 for random)", value=-1)
                         
+                        gr.Markdown("### Advanced Features")
+                        with gr.Row():
+                            enable_character_consistency = gr.Checkbox(
+                                label="Character Consistency", 
+                                value=True,
+                                info="Enforce character appearance consistency across video chains"
+                            )
+                            enable_face_enhancement = gr.Checkbox(
+                                label="Face Enhancement", 
+                                value=True,
+                                info="Enhance face quality and consistency between chains"
+                            )
+                        
                         with gr.Row():
                             generate_btn = gr.Button("Generate", variant="primary")
                             cancel_btn = gr.Button("Cancel")
@@ -1202,6 +1334,8 @@ def create_ui():
                 luma_duration, luma_aspect_ratio,
                 # Add Kling parameters here:
                 kling_duration, kling_aspect_ratio, kling_negative_prompt, kling_creativity,
+                # Advanced features:
+                enable_character_consistency, enable_face_enhancement,
                 generation_running, cancel_requested
             ],
             outputs=[
@@ -1259,7 +1393,9 @@ def create_ui():
                 generation_running, 
                 cancel_requested,
                 video_paths, 
-                final_video_path
+                final_video_path,
+                enable_character_consistency,
+                enable_face_enhancement
             ]
         )
 
@@ -1276,6 +1412,8 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
                            luma_duration="5", luma_aspect_ratio="16:9",
                            # Add Kling parameters:
                            kling_duration="5", kling_aspect_ratio="16:9", kling_negative_prompt="", kling_creativity=0.5,
+                           # Character consistency and face enhancement:
+                           enable_character_consistency=True, enable_face_enhancement=True,
                            gen_running=False, cancel_req=False):
     """Handle the UI aspects of chain generation, including updating UI elements during generation"""
     # Update UI for generation start
@@ -1362,7 +1500,9 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
             seed=seed_val,
             model_type=model_selection,
             model_params=model_params,
-            cancel_requested=lambda: cancel_req
+            cancel_requested=lambda: cancel_req,
+            enable_character_consistency=enable_character_consistency,
+            enable_face_enhancement=enable_face_enhancement
         )
         
         # Process chain generation results
@@ -1735,5 +1875,7 @@ def clear_session():
         False,  # generation_running
         False,  # cancel_requested
         [],  # video_paths
-        None   # final_video_path
+        None,   # final_video_path
+        True,   # enable_character_consistency (reset to default True)
+        True    # enable_face_enhancement (reset to default True)
     ]
