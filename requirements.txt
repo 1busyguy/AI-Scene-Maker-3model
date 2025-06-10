@@ -2,7 +2,7 @@ gradio==5.33.0
 gradio_client==1.10.2
 groovy==0.1.2
 safehttpx==0.1.6
-fal-client==0.4.1
+fal-client==0.7.0
 openai==1.54.4
 langchain==0.2.16
 langchain-openai==0.1.25

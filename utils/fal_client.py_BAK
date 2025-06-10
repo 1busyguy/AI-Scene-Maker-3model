@@ -69,7 +69,7 @@ def generate_video_from_image(prompt, image_url, resolution, num_frames=81, fps=
     if model == "kling":
         logger.info(f"Using Kling 2.1 PRO model with prompt: {prompt}")
         
-        # Enhanced prompt for better image adherence
+        # Enhanced prompt for better image adherence - this helps Kling use the input image properly
         enhanced_prompt = f"Starting exactly from the provided input image, {prompt.lower()}"
         logger.info(f"Enhanced Kling prompt: {enhanced_prompt}")
         
@@ -84,30 +84,34 @@ def generate_video_from_image(prompt, image_url, resolution, num_frames=81, fps=
         
         # Prepare request parameters for Kling
         request_params = {
-            "prompt": enhanced_prompt,  # Use enhanced prompt
+            "prompt": enhanced_prompt,  # Use enhanced prompt for better input image usage
             "image_url": image_url,
             "duration": str(duration),  # Kling expects duration as string "5" or "10"
             "aspect_ratio": aspect_ratio,
         }
         
         # Add optional parameters
-        if seed is not None and seed != -1:
+        if seed is not None:
             request_params["seed"] = seed
             
-        # Handle negative prompt
+        # Add negative prompt handling - use the official default from FAL.ai docs
         if negative_prompt:
             request_params["negative_prompt"] = negative_prompt
         else:
             # Use the official FAL.ai default negative prompt for Kling
             request_params["negative_prompt"] = "blur, distort, and low quality"
         
-        # Add cfg_scale parameter
+        # Add cfg_scale parameter with better default values
+        # Kling works better with higher cfg_scale values for image adherence
+        logger.info(f"Creativity parameter value: {creativity}")
         if creativity is not None:
             # Convert creativity to appropriate cfg_scale range
-            cfg_scale_value = 0.1 + (creativity * 0.9)
+            # Creativity 0.0-1.0 maps to cfg_scale 0.1-1.0 for better results
+            cfg_scale_value = 0.1 + (creativity * 0.9)  # Maps 0.0->0.1, 0.5->0.55, 1.0->1.0
             request_params["cfg_scale"] = cfg_scale_value
-            logger.info(f"Added cfg_scale parameter: {cfg_scale_value}")
+            logger.info(f"Added cfg_scale parameter: {cfg_scale_value} (mapped from creativity: {creativity})")
         else:
+            # Use the official FAL.ai default cfg_scale
             request_params["cfg_scale"] = 0.5
             logger.info("Using default cfg_scale: 0.5")
         
@@ -120,130 +124,144 @@ def generate_video_from_image(prompt, image_url, resolution, num_frames=81, fps=
         httpx_logger.setLevel(logging.ERROR)
         
         try:
-            # Use the subscribe method which is more reliable
+            # Use the fal_client for video generation - same pattern as WAN
             logger.info("Starting Kling 2.1 PRO video generation with FAL.ai")
             start_time = time.time()
             
             # Kling model endpoint
             model_endpoint = "fal-ai/kling-video/v2.1/pro/image-to-video"
             
+            # We'll use two possible approaches depending on what's available in the API
             try:
-                # First try subscribe method if available, otherwise fall back to submit/polling
-                if hasattr(fal_client, 'subscribe'):
-                    logger.info("Using FAL.ai subscribe method for Kling")
-                    
-                    def on_queue_update(update):
-                        if hasattr(update, 'logs') and update.logs:
-                            for log in update.logs:
-                                if isinstance(log, dict) and 'message' in log:
-                                    logger.info(f"Kling progress: {log['message']}")
-                                else:
-                                    logger.info(f"Kling update: {log}")
-                    
-                    # Use subscribe which is more reliable than run
-                    result = fal_client.subscribe(
-                        model_endpoint,
-                        arguments=request_params,
-                        with_logs=True,
-                        on_queue_update=on_queue_update
-                    )
-                else:
-                    # Fallback to submit/polling method for older fal_client versions
-                    logger.info("Using FAL.ai submit/polling method for Kling (subscribe not available)")
-                    
-                    # Submit the request
-                    handler = fal_client.submit(model_endpoint, arguments=request_params)
-                    request_id = handler.request_id
-                    logger.info(f"Kling request submitted with ID: {request_id}")
-                    
-                    # Poll for the result
-                    max_attempts = 180  # 3 minutes with 1s polling for Kling
-                    last_log_time = start_time
-                    
-                    for attempt in range(max_attempts):
-                        # Only log progress occasionally to reduce noise
-                        current_time = time.time()
-                        if current_time - last_log_time > 10:  # Log every 10 seconds
-                            elapsed = int(current_time - start_time)
-                            logger.info(f"Kling video generation in progress... (elapsed: {elapsed}s)")
-                            last_log_time = current_time
-                        
-                        # Check status
-                        status = fal_client.status(model_endpoint, request_id, with_logs=True)
-                        
-                        if hasattr(status, 'status'):
-                            if status.status == "COMPLETED":
-                                logger.info(f"Kling video generation completed in {int(time.time() - start_time)} seconds")
-                                result = fal_client.result(model_endpoint, request_id)
-                                break
-                            elif status.status == "FAILED":
-                                error = "Unknown error"
-                                if hasattr(status, 'error'):
-                                    error = status.error
-                                elif hasattr(status, 'logs') and status.logs:
-                                    error = status.logs[-1] if status.logs else "Unknown error"
-                                logger.error(f"Kling video generation failed: {error}")
-                                raise Exception(f"Kling video generation failed: {error}")
-                        
-                        # Sleep between polling
-                        time.sleep(1.0)
-                    else:
-                        # If we exit the loop without breaking, we timed out
-                        raise Exception("Kling video generation timed out after 3 minutes")
+                # First approach: Try using the run synchronous method 
+                # which directly returns the result (newer versions)
+                logger.info("Using synchronous FAL.ai call for Kling")
+                result = fal_client.run(model_endpoint, arguments=request_params)
                 
-                # Extract video URL from result (common for both methods)
+                # If we got here, result is a dictionary
+                logger.info(f"Kling video generation completed in {int(time.time() - start_time)} seconds")
+                
+                # Handle both possible response formats
                 if isinstance(result, dict):
+                    # Try to extract video URL from the result dict
                     if "video" in result and "url" in result["video"]:
-                        video_url = result["video"]["url"]
+                        return result["video"]["url"]
                     elif "video_url" in result:
-                        video_url = result["video_url"]
+                        return result["video_url"]
                     else:
                         logger.error(f"Unexpected result format: {result.keys()}")
-                        raise Exception(f"Unexpected result format from Kling API")
-                    
-                    logger.info(f"Kling video generation completed in {int(time.time() - start_time)} seconds")
-                    return video_url
+                        raise Exception(f"Unexpected result format: {result.keys()}")
                 else:
                     logger.error(f"Unexpected result type: {type(result)}")
                     raise Exception(f"Unexpected result type: {type(result)}")
-                    
-            except Exception as e:
-                error_msg = str(e)
-                logger.error(f"Error generating video with Kling 2.1 PRO: {error_msg}")
                 
-                # Check for specific error patterns
-                if "400" in error_msg or "Bad Request" in error_msg:
-                    logger.error("🚨 Kling API rejected the request - checking parameters...")
-                    logger.error(f"Request parameters were: {json.dumps(request_params, indent=2)}")
+            except Exception as http_error:
+                # Handle 422 errors specifically with better debugging
+                if "422" in str(http_error):
+                    logger.error("🚨 422 UNPROCESSABLE ENTITY ERROR - Parameter validation failed")
+                    logger.error(f"Request parameters sent: {request_params}")
+                    logger.error("Checking for common issues:")
                     
-                    # Common issues with Kling API:
+                    # Validate each parameter
                     if len(prompt) > 2000:
                         logger.error(f"❌ Prompt too long: {len(prompt)} characters (max 2000)")
-                        raise Exception("Prompt is too long for Kling. Please shorten it to under 2000 characters.")
-                    
-                    if not image_url or not image_url.startswith(("http://", "https://")):
+                    else:
+                        logger.info(f"✅ Prompt length OK: {len(prompt)} characters")
+                        
+                    if not image_url or not image_url.startswith("http"):
                         logger.error(f"❌ Invalid image URL: {image_url}")
-                        raise Exception("Invalid image URL. Please ensure the image was uploaded correctly.")
-                    
-                    if duration not in [5, 10]:
-                        logger.error(f"❌ Invalid duration: {duration}")
-                        raise Exception("Invalid duration. Kling only supports 5 or 10 seconds.")
-                    
-                    if aspect_ratio not in ["16:9", "9:16", "1:1"]:
-                        logger.error(f"❌ Invalid aspect ratio: {aspect_ratio}")
-                        raise Exception(f"Invalid aspect ratio '{aspect_ratio}'. Kling supports: 16:9, 9:16, 1:1")
-                    
-                    # If we can't identify the specific issue
-                    raise Exception("Kling API rejected the request. This may be due to content restrictions or API changes. Try a different prompt or image.")
-                
-                elif "credits" in error_msg.lower() or "quota" in error_msg.lower():
-                    raise Exception("Insufficient credits for Kling 2.1 PRO. Please check your FAL.ai account.")
-                
+                    else:
+                        logger.info(f"✅ Image URL format OK: {image_url[:80]}...")
+                        
+                    if request_params["duration"] not in ["5", "10"]:
+                        logger.error(f"❌ Invalid duration: {request_params['duration']} (must be '5' or '10')")
+                    else:
+                        logger.info(f"✅ Duration OK: {request_params['duration']}")
+                        
+                    if request_params["aspect_ratio"] not in ["16:9", "9:16", "1:1"]:
+                        logger.error(f"❌ Invalid aspect ratio: {request_params['aspect_ratio']}")
+                    else:
+                        logger.info(f"✅ Aspect ratio OK: {request_params['aspect_ratio']}")
+                        
+                    cfg_scale = request_params.get("cfg_scale", 0.5)
+                    if not isinstance(cfg_scale, (int, float)) or cfg_scale < 0 or cfg_scale > 10:
+                        logger.error(f"❌ Invalid cfg_scale: {cfg_scale} (must be float 0-10)")
+                    else:
+                        logger.info(f"✅ cfg_scale OK: {cfg_scale}")
+                        
+                    # Try fallback to submit/polling method
+                    logger.info("Trying fallback to submit/polling method for Kling")
                 else:
-                    raise
+                    logger.info(f"Non-422 error, trying fallback: {str(http_error)}")
                 
+                # Second approach: If run fails, fall back to submit and manual polling
+                logger.info(f"Synchronous call failed ({str(http_error)}), falling back to submit/polling method for Kling")
+                
+                # Use the submit method and poll for the result
+                queue_handler = fal_client.submit(model_endpoint, arguments=request_params)
+                request_id = queue_handler.request_id
+                
+                # Poll for the result with adaptive polling intervals
+                max_attempts = 120  # 2 minutes with 1s polling
+                last_log_time = start_time
+                
+                for attempt in range(max_attempts):
+                    # Only log progress occasionally to reduce noise
+                    current_time = time.time()
+                    if current_time - last_log_time > 5:  # Log every 5 seconds
+                        elapsed = int(current_time - start_time)
+                        logger.info(f"Kling video generation in progress... (elapsed: {elapsed}s)")
+                        last_log_time = current_time
+                    
+                    # Check status
+                    status = fal_client.status(model_endpoint, request_id)
+                    
+                    if status.status == "COMPLETED":
+                        logger.info(f"Kling video generation completed in {int(time.time() - start_time)} seconds")
+                        result = fal_client.result(model_endpoint, request_id)
+                        
+                        # Extract video URL from result
+                        if "video" in result and "url" in result["video"]:
+                            return result["video"]["url"]
+                        elif "video_url" in result:
+                            return result["video_url"]
+                        else:
+                            logger.error(f"Unexpected result format: {result.keys()}")
+                            raise Exception(f"Unexpected result format: {result.keys()}")
+                    
+                    elif status.status == "FAILED":
+                        error = "Unknown error"
+                        if hasattr(status, "logs") and status.logs:
+                            error = status.logs[-1]
+                        logger.error(f"Kling video generation failed: {error}")
+                        raise Exception(f"Kling video generation failed: {error}")
+                    
+                    # Sleep between polling
+                    time.sleep(1.0)
+                
+                # If we get here, polling timed out
+                raise Exception("Kling video generation timed out")
+            
         except Exception as e:
-            logger.error(f"Final error with Kling: {str(e)}")
+            error_msg = str(e)
+            logger.error(f"Error generating video with Kling 2.1 PRO: {error_msg}")
+            
+            # Parse out useful information from the error
+            if "422" in error_msg:
+                logger.error("🚨 FINAL 422 ERROR - Kling 2.1 PRO API rejected the request parameters")
+                logger.error("This usually indicates an invalid parameter format or value")
+                logger.error("Check the parameter validation messages above for details")
+            elif "400 Bad Request" in error_msg:
+                logger.error("Kling 2.1 PRO API rejected the request - likely an issue with parameters")
+                logger.error(f"Request parameters were: {request_params}")
+                
+                # Check common issues
+                if len(prompt) > 2000:
+                    logger.error(f"Prompt may be too long: {len(prompt)} characters")
+                
+                if not image_url or not image_url.startswith("http"):
+                    logger.error(f"Image URL appears invalid: {image_url}")
+            
             raise
         finally:
             # Restore original logging level
