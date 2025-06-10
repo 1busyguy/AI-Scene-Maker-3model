@@ -381,20 +381,37 @@ def generate_character_locked_cinematic_prompt(
     # If character manager is provided, use it to set character description
     if character_manager:
         char_desc = character_manager.generate_character_description()
-        # Enhance with additional details
-        char_desc['body_type'] = f"same build as {main_subject}"
-        char_desc['hair_details'] = char_desc.get('distinctive_features', '').split(',')[0] if char_desc.get('distinctive_features') else 'consistent hairstyle'
+        
+        # Build body_type and hair_details from character manager data only
+        # Don't use potentially corrupted main_subject parameter
+        appearance = char_desc.get('appearance', '')
+        if appearance:
+            char_desc['body_type'] = f"consistent build and posture of {appearance}"
+        else:
+            char_desc['body_type'] = "consistent build and posture"
+            
+        # Extract hair details from distinctive_features if available
+        distinctive = char_desc.get('distinctive_features', '')
+        if distinctive and 'hair' in distinctive.lower():
+            # Extract hair-related terms
+            hair_terms = [term.strip() for term in distinctive.split(',') if 'hair' in term.lower()]
+            if hair_terms:
+                char_desc['hair_details'] = hair_terms[0]
+            else:
+                char_desc['hair_details'] = "consistent hairstyle and color"
+        else:
+            char_desc['hair_details'] = "consistent hairstyle and color"
         
         prompt_generator.set_character_description(char_desc)
     else:
-        # Create character description from provided details
+        # Create character description from provided details (fallback only)
         char_desc = {
-            'appearance': main_subject,
-            'facial_features': f"facial features of {main_subject}",
-            'clothing': f"clothing visible in the scene",
-            'distinctive_features': f"distinctive features of {main_subject}",
-            'body_type': f"same physique as {main_subject}",
-            'hair_details': f"hairstyle and color from the original image"
+            'appearance': "the person in the image",
+            'facial_features': "consistent facial features",
+            'clothing': "clothing visible in the scene",
+            'distinctive_features': "distinctive features from the image",
+            'body_type': "consistent build and posture",
+            'hair_details': "hairstyle and color from the original image"
         }
         prompt_generator.set_character_description(char_desc)
     

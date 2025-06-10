@@ -57,3 +57,13 @@ if __name__ == "__main__":
     print(f"  Default Resolution: {DEFAULT_RESOLUTION}")
     print(f"  Default Inference Steps: {DEFAULT_INFERENCE_STEPS}")
     print(f"  API Keys Configured: {'Yes' if FAL_API_KEY and OPENAI_API_KEY else 'No'}")
+
+# Face Swapping Configuration
+FACE_SWAP_CONFIG = {
+    "skip_frames": 1,  # Process every N frames (1 = all frames)
+    "similarity_threshold": 0.5,  # Min similarity to swap (0.0-1.0)
+    "batch_size": 4,  # Frames to process in parallel
+    "use_gpu": True,  # Prefer GPU if available
+    "max_video_size": 100,  # Max video size in MB to process
+    "quality_preset": "balanced"  # "fast", "balanced", or "quality"
+}

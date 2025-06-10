@@ -35,6 +35,81 @@ logging.getLogger("httpx").setLevel(logging.ERROR)  # Only show errors, not warn
 logging.getLogger("httpcore").setLevel(logging.ERROR)
 logging.getLogger("urllib3").setLevel(logging.ERROR)
 
+def truncate_negative_prompt_for_kling(negative_prompt: str, max_length: int = 100) -> str:
+    """
+    Truncate negative prompt specifically for Kling API which is very sensitive to length
+    Keep only the most essential terms
+    """
+    if not negative_prompt:
+        return "blur, low quality"
+    
+    # Essential terms to prioritize for Kling
+    essential_terms = [
+        "blur", "low quality", "distorted", "bad anatomy",
+        "different person", "changed appearance"
+    ]
+    
+    # Split the negative prompt into individual terms
+    terms = [term.strip() for term in negative_prompt.split(",")]
+    
+    # Start with essential terms that are present
+    filtered_terms = []
+    for essential in essential_terms:
+        for term in terms:
+            if essential.lower() in term.lower() and term not in filtered_terms:
+                filtered_terms.append(term)
+                break
+    
+    # Add other important terms until we approach the length limit
+    for term in terms:
+        if term not in filtered_terms:
+            # Check if adding this term would exceed the limit
+            test_prompt = ", ".join(filtered_terms + [term])
+            if len(test_prompt) <= max_length:
+                filtered_terms.append(term)
+            else:
+                break
+    
+    result = ", ".join(filtered_terms)
+    
+    # If still too long, use only the most essential
+    if len(result) > max_length:
+        result = "blur, low quality, different person"
+    
+    logger.info(f"Truncated negative prompt from {len(negative_prompt)} to {len(result)} characters")
+    return result
+
+def sanitize_prompt_for_kling(prompt: str) -> str:
+    """
+    Minimal sanitization for Kling API - only fix structural issues, preserve descriptive content
+    """
+    import re
+    cleaned = prompt.strip()
+    
+    # Only fix incomplete sentences and dangling prepositions
+    cleaned = re.sub(r'\s+of\s*\.?\s*$', '.', cleaned)  # Remove dangling "of."
+    cleaned = re.sub(r'\s+in\s*\.?\s*$', '.', cleaned)  # Remove dangling "in."
+    cleaned = re.sub(r'\s+with\s*\.?\s*$', '.', cleaned)  # Remove dangling "with."
+    cleaned = re.sub(r'\s+and\s*\.?\s*$', '.', cleaned)  # Remove dangling "and."
+    
+    # Clean up multiple spaces and periods
+    cleaned = re.sub(r'\s+', ' ', cleaned)
+    cleaned = re.sub(r'\.+', '.', cleaned)
+    
+    # Ensure sentence ends properly
+    if not cleaned.endswith('.') and not cleaned.endswith('!') and not cleaned.endswith('?'):
+        cleaned += '.'
+    
+    # Keep original detailed content but ensure reasonable length
+    if len(cleaned) > 300:  # More generous limit to preserve detail
+        # Only truncate if absolutely necessary, at sentence boundaries
+        sentences = cleaned.split('.')
+        if len(sentences) > 3:
+            cleaned = '. '.join(sentences[:3]).strip() + '.'
+    
+    logger.info(f"Minimally sanitized prompt from {len(prompt)} to {len(cleaned)} characters")
+    return cleaned
+
 def generate_video_from_image(prompt, image_url, resolution, num_frames=81, fps=16, seed=None, 
                          inference_steps=40, safety_checker=False, prompt_expansion=True, model="wan",
                          duration=5, style=None, negative_prompt="", aspect_ratio="16:9", loop=False, 
@@ -69,9 +144,19 @@ def generate_video_from_image(prompt, image_url, resolution, num_frames=81, fps=
     if model == "kling":
         logger.info(f"Using Kling 2.1 PRO model with prompt: {prompt}")
         
-        # Enhanced prompt for better image adherence
-        enhanced_prompt = f"Starting exactly from the provided input image, {prompt.lower()}"
-        logger.info(f"Enhanced Kling prompt: {enhanced_prompt}")
+        # Simplified prompt for Kling - avoid problematic prefixes and content
+        # Remove the "Starting exactly from..." prefix as it may confuse Kling
+        clean_prompt = prompt.strip()
+        if clean_prompt.lower().startswith("starting exactly from the provided input image"):
+            # Remove the problematic prefix and clean up the prompt
+            clean_prompt = clean_prompt[len("starting exactly from the provided input image"):].strip()
+            if clean_prompt.startswith(","):
+                clean_prompt = clean_prompt[1:].strip()
+        
+        # Make the prompt more Kling-friendly by removing potentially problematic terms
+        clean_prompt = sanitize_prompt_for_kling(clean_prompt)
+        
+        logger.info(f"Cleaned Kling prompt: {clean_prompt}")
         
         # Validate duration for Kling
         duration = int(duration) if isinstance(duration, str) else duration
@@ -82,9 +167,17 @@ def generate_video_from_image(prompt, image_url, resolution, num_frames=81, fps=
         # Log image URL for debugging
         logger.info(f"Using input image URL: {image_url}")
         
+        # Validate image URL format for Kling
+        if not image_url or not image_url.startswith(("http://", "https://")):
+            raise Exception(f"Invalid image URL for Kling: {image_url}")
+        
+        # Check if this might be an extracted frame (which Kling sometimes rejects)
+        if "koala" in image_url or "lion" in image_url:
+            logger.warning("⚠️ Using extracted frame - Kling may be more sensitive to these")
+        
         # Prepare request parameters for Kling
         request_params = {
-            "prompt": enhanced_prompt,  # Use enhanced prompt
+            "prompt": clean_prompt,  # Use cleaned prompt
             "image_url": image_url,
             "duration": str(duration),  # Kling expects duration as string "5" or "10"
             "aspect_ratio": aspect_ratio,
@@ -94,12 +187,15 @@ def generate_video_from_image(prompt, image_url, resolution, num_frames=81, fps=
         if seed is not None and seed != -1:
             request_params["seed"] = seed
             
-        # Handle negative prompt
+        # Handle negative prompt - keep it very short for Kling
         if negative_prompt:
-            request_params["negative_prompt"] = negative_prompt
+            # Kling is very sensitive to negative prompt length - keep only essentials
+            kling_negative = truncate_negative_prompt_for_kling(negative_prompt)
+            request_params["negative_prompt"] = kling_negative
+            logger.info(f"Truncated negative prompt for Kling: {kling_negative}")
         else:
-            # Use the official FAL.ai default negative prompt for Kling
-            request_params["negative_prompt"] = "blur, distort, and low quality"
+            # Use minimal default negative prompt for Kling
+            request_params["negative_prompt"] = "blur, low quality"
         
         # Add cfg_scale parameter
         if creativity is not None:
@@ -240,7 +336,13 @@ def generate_video_from_image(prompt, image_url, resolution, num_frames=81, fps=
                     raise Exception("Insufficient credits for Kling 2.1 PRO. Please check your FAL.ai account.")
                 
                 else:
-                    raise
+                    # For persistent Kling errors, suggest trying a different model
+                    logger.error("🚨 KLING PERSISTENT ERROR: API consistently rejecting requests")
+                    logger.error("RECOMMENDATION: Try switching to LUMA Ray2 or Pixverse v3.5 for better reliability")
+                    raise Exception(
+                        f"Kling 2.1 PRO API error: {error_msg}. "
+                        "This model may be experiencing issues. Try LUMA Ray2 or Pixverse v3.5 instead."
+                    )
                 
         except Exception as e:
             logger.error(f"Final error with Kling: {str(e)}")
@@ -661,8 +763,79 @@ def encode_image_to_base64(image_path):
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
 
-def upload_file(file_path):
-    """Upload a file to FAL.ai and return the URL"""
+def upload_file_high_quality(file_path):
+    """
+    Upload a file to FAL.ai with maximum quality preservation.
+    Optimizes image format and settings to prevent quality degradation.
+    Uses local temp directory to avoid Windows permission issues.
+    """
+    logger.info(f"HIGH-QUALITY UPLOAD: Uploading file with quality optimization: {file_path}")
+    
+    try:
+        # Create a quality-optimized version of the image
+        from PIL import Image
+        
+        # Load the image
+        img = Image.open(file_path)
+        
+        # Ensure we're working with RGB
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        
+        # Create local temp directory instead of system temp to avoid permission issues
+        file_dir = os.path.dirname(os.path.abspath(file_path))
+        local_temp_dir = os.path.join(file_dir, ".temp_upload")
+        os.makedirs(local_temp_dir, exist_ok=True)
+        
+        # Create temporary high-quality PNG file in local directory
+        import time
+        import uuid
+        temp_filename = f"temp_quality_upload_{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
+        temp_path = os.path.join(local_temp_dir, temp_filename)
+        
+        try:
+            # Save with maximum quality PNG settings
+            img.save(temp_path, format='PNG', optimize=False, compress_level=0)
+            
+            # Get file info for logging
+            original_size = os.path.getsize(file_path) / 1024  # KB
+            optimized_size = os.path.getsize(temp_path) / 1024  # KB
+            logger.info(f"QUALITY OPTIMIZATION: {original_size:.1f}KB → {optimized_size:.1f}KB (PNG lossless)")
+            
+            # Upload the optimized file
+            with open(temp_path, 'rb') as f:
+                file_content = f.read()
+            
+            # Upload with PNG content type for lossless quality
+            result = fal_client.upload(file_content, content_type='image/png')
+            
+            logger.info(f"HIGH-QUALITY file uploaded successfully: {result}")
+            return result
+            
+        finally:
+            # Clean up temporary file
+            try:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+                    logger.debug(f"Cleaned up temp file: {temp_path}")
+            except Exception as cleanup_error:
+                logger.warning(f"Could not clean up temp file {temp_path}: {cleanup_error}")
+            
+            # Try to clean up temp directory if it's empty
+            try:
+                if os.path.exists(local_temp_dir) and not os.listdir(local_temp_dir):
+                    os.rmdir(local_temp_dir)
+                    logger.debug(f"Cleaned up temp directory: {local_temp_dir}")
+            except Exception as cleanup_error:
+                logger.debug(f"Temp directory cleanup: {cleanup_error}")
+            
+    except Exception as e:
+        logger.warning(f"High-quality upload failed ({str(e)}), falling back to standard upload")
+        # Fallback to standard upload if optimization fails
+        return upload_file_standard(file_path)
+
+def upload_file_standard(file_path):
+    """Standard file upload to FAL.ai (original method)"""
     logger.info(f"Uploading file: {file_path}")
     
     try:
@@ -695,6 +868,22 @@ def upload_file(file_path):
         logger.exception(f"Error uploading file: {str(e)}")
         # Try the alternative method if this fails
         return upload_file_alternative(file_path)
+
+def upload_file(file_path, high_quality=True):
+    """
+    Upload a file to FAL.ai with optional quality optimization.
+    
+    Args:
+        file_path: Path to the file to upload
+        high_quality: Whether to use quality-optimized upload (default: True)
+        
+    Returns:
+        URL of the uploaded file
+    """
+    if high_quality:
+        return upload_file_high_quality(file_path)
+    else:
+        return upload_file_standard(file_path)
 
 def upload_file_alternative(file_path):
     """

@@ -16,6 +16,7 @@ from realesrgan import RealESRGANer
 from gfpgan import GFPGANer
 import tempfile
 import shutil
+from utils.face_swapping import FaceSwapper, EnhancedVideoFaceConsistencyEnhancer
 
 logger = logging.getLogger(__name__)
 
@@ -78,8 +79,43 @@ class FaceEnhancer:
             logger.info("Models will be downloaded on first use")
             self.model_loaded = False
     
+    def _apply_light_enhancement(self, img: np.ndarray) -> np.ndarray:
+        """
+        Apply light enhancement that's more API-compatible
+        Uses OpenCV-based enhancement instead of heavy AI models
+        """
+        try:
+            # Convert to float for processing
+            img_float = img.astype(np.float32) / 255.0
+            
+            # Subtle contrast enhancement
+            contrast_factor = 1.1
+            img_float = np.clip((img_float - 0.5) * contrast_factor + 0.5, 0, 1)
+            
+            # Gentle brightness adjustment
+            brightness_factor = 1.05
+            img_float = np.clip(img_float * brightness_factor, 0, 1)
+            
+            # Light sharpening using unsharp mask
+            gaussian_blur = cv2.GaussianBlur(img_float, (5, 5), 1.0)
+            unsharp_mask = cv2.addWeighted(img_float, 1.5, gaussian_blur, -0.5, 0)
+            img_float = np.clip(unsharp_mask, 0, 1)
+            
+            # Noise reduction
+            img_float = cv2.bilateralFilter(img_float, 5, 0.1, 0.1)
+            
+            # Convert back to uint8
+            enhanced_img = (img_float * 255).astype(np.uint8)
+            
+            logger.info("Applied light enhancement")
+            return enhanced_img
+            
+        except Exception as e:
+            logger.error(f"Error in light enhancement: {str(e)}")
+            return img
+    
     def enhance_face(self, image_path: str, output_path: Optional[str] = None, 
-                    enhance_background: bool = True) -> str:
+                    enhance_background: bool = True, light_mode: bool = False) -> str:
         """
         Enhance faces in a single image
         
@@ -87,6 +123,7 @@ class FaceEnhancer:
             image_path: Path to input image
             output_path: Path to save enhanced image (optional)
             enhance_background: Whether to enhance the background as well
+            light_mode: Use lighter enhancement that's more API-compatible
             
         Returns:
             Path to enhanced image
@@ -102,21 +139,25 @@ class FaceEnhancer:
             # Read image
             img = cv2.imread(image_path, cv2.IMREAD_COLOR)
             
-            # Enhance faces
-            cropped_faces, restored_faces, restored_img = self.face_enhancer.enhance(
-                img, 
-                has_aligned=False, 
-                only_center_face=False, 
-                paste_back=True,
-                weight=0.5  # Blend weight for more natural results
-            )
-            
-            # If no faces detected, just enhance the whole image
-            if restored_img is None:
-                if enhance_background and self.bg_upsampler:
-                    restored_img, _ = self.bg_upsampler.enhance(img, outscale=2)
-                else:
-                    restored_img = img
+            if light_mode:
+                # Light enhancement mode - API-friendly
+                restored_img = self._apply_light_enhancement(img)
+            else:
+                # Full GFPGAN enhancement
+                cropped_faces, restored_faces, restored_img = self.face_enhancer.enhance(
+                    img, 
+                    has_aligned=False, 
+                    only_center_face=False, 
+                    paste_back=True,
+                    weight=0.5  # Blend weight for more natural results
+                )
+                
+                # If no faces detected, just enhance the whole image
+                if restored_img is None:
+                    if enhance_background and self.bg_upsampler:
+                        restored_img, _ = self.bg_upsampler.enhance(img, outscale=2)
+                    else:
+                        restored_img = img
             
             # Convert back to BGR for OpenCV
             if restored_img.shape[2] == 4:  # RGBA
@@ -171,9 +212,13 @@ class FaceEnhancer:
                 base_path, ext = os.path.splitext(video_path)
                 output_path = f"{base_path}_enhanced{ext}"
             
-            # Create temporary directory for frames
-            temp_dir = tempfile.mkdtemp()
-            enhanced_frames_dir = os.path.join(temp_dir, 'enhanced')
+            # Create local temporary directory for frames to avoid Windows permission issues
+            video_dir = os.path.dirname(os.path.abspath(video_path))
+            local_temp_dir = os.path.join(video_dir, ".temp_face_enhancement")
+            os.makedirs(local_temp_dir, exist_ok=True)
+            
+            # Create subdirectory for enhanced frames
+            enhanced_frames_dir = os.path.join(local_temp_dir, 'enhanced')
             os.makedirs(enhanced_frames_dir, exist_ok=True)
             
             logger.info(f"Processing {total_frames} frames from video...")
@@ -219,8 +264,12 @@ class FaceEnhancer:
                 enhanced_frames_dir, output_path, fps, (width, height)
             )
             
-            # Cleanup
-            shutil.rmtree(temp_dir)
+            # Cleanup local temp directory
+            try:
+                shutil.rmtree(local_temp_dir)
+                logger.debug(f"Cleaned up temp directory: {local_temp_dir}")
+            except Exception as cleanup_error:
+                logger.warning(f"Could not clean up temp directory {local_temp_dir}: {cleanup_error}")
             
             logger.info(f"Enhanced video saved to: {output_path}")
             return output_path
@@ -406,25 +455,29 @@ class FaceEnhancer:
         return None
 
 
-class VideoFaceConsistencyEnhancer:
-    """Enhance face consistency across video chains"""
+class VideoFaceConsistencyEnhancer(EnhancedVideoFaceConsistencyEnhancer):
+    """Enhanced face consistency enhancer with face swapping and original interface"""
     
     def __init__(self, reference_image_path: str):
         """
-        Initialize with a reference image
+        Initialize with a reference image - maintains original interface
         
         Args:
             reference_image_path: Path to reference image with desired face
         """
+        # Initialize the enhanced parent class
+        super().__init__(reference_image_path)
+        
+        # Maintain original interface properties
         self.reference_image_path = reference_image_path
         self.face_enhancer = FaceEnhancer()
         self.reference_features = None
         
-        # Extract reference features
+        # Extract reference features (original method)
         self._extract_reference_features()
     
     def _extract_reference_features(self):
-        """Extract facial features from reference image"""
+        """Extract facial features from reference image - original method"""
         try:
             import face_recognition
             
@@ -445,7 +498,8 @@ class VideoFaceConsistencyEnhancer:
     def enhance_video_chain_consistency(self, video_paths: List[str], 
                                       output_dir: Optional[str] = None) -> List[str]:
         """
-        Enhance face consistency across a chain of videos
+        Enhance face consistency across a chain of videos - original interface
+        Now with enhanced functionality from parent class
         
         Args:
             video_paths: List of video paths in the chain
@@ -457,6 +511,16 @@ class VideoFaceConsistencyEnhancer:
         if output_dir is None:
             output_dir = os.path.dirname(video_paths[0])
         
+        # Try to use enhanced functionality from parent class if available
+        try:
+            # Check if parent class has enhanced methods
+            if hasattr(super(), 'enhance_video_chain_with_swapping'):
+                logger.info("Using enhanced face swapping functionality")
+                return super().enhance_video_chain_with_swapping(video_paths, output_dir)
+        except Exception as e:
+            logger.warning(f"Enhanced functionality failed, falling back to original: {str(e)}")
+        
+        # Fallback to original implementation
         enhanced_paths = []
         
         # First, create a consistent face reference from all videos
@@ -482,7 +546,7 @@ class VideoFaceConsistencyEnhancer:
     
     def _enhance_video_with_reference(self, video_path: str, reference_face_path: str,
                                     output_path: str) -> str:
-        """Enhance video using reference face for consistency"""
+        """Enhance video using reference face for consistency - original method"""
         # For now, use standard enhancement
         # In production, this would apply face swapping or style transfer
         return self.face_enhancer.enhance_video(video_path, output_path)

@@ -29,3 +29,8 @@ torchvision>=0.15.0
 # Additional utilities
 dlib==19.24.2
 opencv-contrib-python==4.10.0.84
+
+# Face Swapping Dependencies
+insightface==0.7.3
+onnx==1.15.0
+onnxruntime==1.16.3  # or onnxruntime-gpu for GPU support

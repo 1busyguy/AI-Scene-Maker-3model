@@ -319,6 +319,20 @@ class CharacterConsistencyManager:
             'distinctive_features': ""
         }
         
+        # Log what we actually detected for debugging
+        logger.info(f"🔍 CHARACTER ANALYSIS DEBUG:")
+        logger.info(f"Character profile: {self.character_profile}")
+        
+        # Try to use OpenAI analysis as fallback for more accurate description
+        try:
+            openai_description = self._get_openai_character_description()
+            if openai_description:
+                logger.info(f"✅ Using OpenAI character analysis: {openai_description}")
+                return openai_description
+        except Exception as e:
+            logger.warning(f"OpenAI character analysis failed: {str(e)}")
+        
+        # Fallback to original method with improved logic
         if self.character_profile:
             # Build appearance description
             appearance_parts = []
@@ -343,7 +357,117 @@ class CharacterConsistencyManager:
                 clothing_desc = self._rgb_to_description(rgb, "clothing")
                 description['clothing'] = f"wearing {clothing_desc} colored clothing"
         
+        logger.warning(f"⚠️ Using fallback character analysis: {description}")
         return description
+    
+    def _get_openai_character_description(self) -> Optional[Dict[str, str]]:
+        """Use OpenAI to get accurate character description"""
+        try:
+            import base64
+            from openai import OpenAI
+            from config import OPENAI_API_KEY
+            
+            client = OpenAI(api_key=OPENAI_API_KEY)
+            
+            # Encode the image
+            with open(self.reference_image_path, "rb") as image_file:
+                base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+            
+            # Get detailed description from OpenAI with custom prompt
+            response = client.chat.completions.create(
+                model="gpt-4.1-mini",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text", 
+                                "text": """Analyze this image and provide a detailed character description. 
+                                Focus on: age (approximate), gender, hair color/style, clothing description, and distinctive features.
+                                Be very specific about clothing (e.g., 'silver metallic bikini' not just 'clothing').
+                                Be specific about hair color and style.
+                                Describe exactly what you see in the image."""
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{base64_image}"
+                                }
+                            }
+                        ]
+                    }
+                ],
+                max_tokens=300
+            )
+            
+            full_description = response.choices[0].message.content
+            logger.info(f"🎯 OpenAI character analysis: {full_description}")
+            
+            # Parse into components
+            description = {
+                'appearance': "",
+                'facial_features': "",
+                'clothing': "",
+                'distinctive_features': ""
+            }
+            
+            # Extract basic info from full description
+            lower_desc = full_description.lower()
+            
+            # Gender and age
+            if 'woman' in lower_desc or 'female' in lower_desc:
+                if 'young' in lower_desc:
+                    description['appearance'] = "young woman"
+                else:
+                    description['appearance'] = "woman"
+            elif 'man' in lower_desc or 'male' in lower_desc:
+                if 'young' in lower_desc:
+                    description['appearance'] = "young man"
+                else:
+                    description['appearance'] = "man"
+            
+            # Clothing - look for specific terms
+            if 'bikini' in lower_desc:
+                if 'silver' in lower_desc or 'metallic' in lower_desc:
+                    description['clothing'] = "wearing a silver metallic bikini"
+                elif 'reflective' in lower_desc:
+                    description['clothing'] = "wearing a reflective bikini"
+                else:
+                    description['clothing'] = "wearing a bikini"
+            elif 'swimsuit' in lower_desc:
+                description['clothing'] = "wearing a swimsuit"
+            elif 'dress' in lower_desc:
+                description['clothing'] = "wearing a dress"
+            elif 'shirt' in lower_desc:
+                description['clothing'] = "wearing a shirt"
+            
+            # Hair - more comprehensive search
+            hair_colors = ['blonde', 'brown', 'black', 'red', 'silver', 'gray', 'white', 'dark', 'light']
+            hair_styles = ['long', 'short', 'curly', 'straight', 'wavy']
+            
+            hair_parts = []
+            for color in hair_colors:
+                if color in lower_desc and 'hair' in lower_desc:
+                    hair_parts.append(color)
+                    break
+            
+            for style in hair_styles:
+                if style in lower_desc and 'hair' in lower_desc:
+                    hair_parts.append(style)
+                    break
+            
+            if hair_parts:
+                description['distinctive_features'] = f"{' '.join(hair_parts)} hair"
+            
+            # If we found some details, use this analysis
+            if description['clothing'] or description['distinctive_features'] or description['appearance']:
+                logger.info(f"✅ Parsed OpenAI description: {description}")
+                return description
+                
+        except Exception as e:
+            logger.error(f"Error getting OpenAI character description: {str(e)}")
+        
+        return None
     
     def _rgb_to_description(self, rgb: List[int], context: str) -> str:
         """Convert RGB values to human-readable color description"""
@@ -427,9 +551,21 @@ class CharacterConsistencyManager:
                     f"Regenerate {len(report['failed_frames'])} videos with low consistency"
                 )
         
-        # Save report
+        # Save report with JSON serialization fix
         report_path = os.path.join(self.output_dir, "character_validation_report.json")
         with open(report_path, 'w') as f:
-            json.dump(report, f, indent=2)
+            json.dump(report, f, indent=2, default=self._json_serializer)
         
         return report
+    
+    def _json_serializer(self, obj):
+        """JSON serializer for objects not serializable by default json code"""
+        if isinstance(obj, np.integer):
+            return int(obj)
+        elif isinstance(obj, np.floating):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, (np.bool_, bool)):
+            return bool(obj)
+        return str(obj)

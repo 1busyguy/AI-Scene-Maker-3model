@@ -179,7 +179,10 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                                        cancel_requested=lambda: False,
                                        # New parameters
                                        enable_character_consistency=True,
-                                       enable_face_enhancement=True):
+                                       enable_face_enhancement=True,
+                                       enable_face_swapping=False,
+                                       enable_quality_preservation=True,
+                                       quality_vs_speed="Maximum Quality"):
     """
     Generate a series of AI-generated videos with updates for the gradio UI
     Returns a generator that yields (update_type, data, message)
@@ -293,8 +296,8 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
             try:
                 from utils.face_enhancement import FaceEnhancer
                 face_enhancer = FaceEnhancer()
-                # Enhance the input image
-                enhanced_input = face_enhancer.enhance_face(image_path)
+                # Enhance the input image (use light mode for better API compatibility)
+                enhanced_input = face_enhancer.enhance_face(image_path, light_mode=True)
                 if enhanced_input != image_path:
                     image_path = enhanced_input
                     logger.info("Input image face enhanced")
@@ -379,8 +382,8 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
         # Initialize lists to store video paths and key frames
         current_image_path = image_path
         
-        # Upload initial image to FAL.ai
-        yield "progress", 0.2, "Uploading initial image..."
+        # Upload initial image to FAL.ai with quality optimization
+        yield "progress", 0.2, "Uploading initial image with quality optimization..."
         try:
             # Save original image hash for comparison throughout the chain
             import hashlib
@@ -389,8 +392,12 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
             logger.info(f"ORIGINAL INPUT IMAGE HASH: {original_input_hash}")
             logger.info(f"This hash will be compared against all extracted frames to detect progression")
             
-            current_image_url = fal_client.upload_file(current_image_path)
-            logger.info(f"Uploaded image URL: {current_image_url}")
+            # Use quality-optimized upload based on user settings
+            use_high_quality_upload = enable_quality_preservation and quality_vs_speed in ["Maximum Quality", "Balanced"]
+            current_image_url = fal_client.upload_file(current_image_path, high_quality=use_high_quality_upload)
+            
+            quality_msg = "high-quality" if use_high_quality_upload else "standard"
+            logger.info(f"Uploaded image URL with {quality_msg} settings: {current_image_url}")
         except Exception as e:
             error_msg = str(e)
             logger.exception("Error uploading image to FAL")
@@ -639,17 +646,21 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                     yield "progress", base_progress + step_size * 0.8, "Finding highest quality frame for continuity..."
                     logger.info(f"Finding highest quality frame for chain {chain_number}")
                     
-                    # Extract best frame from last 10 frames and trim video to end at this frame
-                    # TEMPORARILY USING SIMPLE EXTRACTION TO TEST
-                    logger.info("🔧 TESTING: Using simple frame extraction instead of complex method")
-                    best_frame_path, trimmed_video_path = video_processing.extract_simple_last_frame(
-                        video_path,
-                        os.path.join(session_dir, f"chain_{chain_number:02d}_processed")
-                    )
-                    
-                    # Skip trimmed video logic for simple extraction method
-                    # (Simple extraction doesn't do trimming, so video_path remains the same)
-                    logger.info("🔧 TESTING: Skipping video trimming for simple extraction method")
+                    # Choose frame extraction method based on quality settings
+                    if enable_quality_preservation and quality_vs_speed in ["Maximum Quality", "Balanced"]:
+                        logger.info("🎯 QUALITY PRESERVATION: Using advanced high-quality frame extraction")
+                        best_frame_path, _ = video_processing.extract_high_quality_frame_for_chain(
+                            video_path,
+                            os.path.join(session_dir, f"chain_{chain_number:02d}_processed")
+                        )
+                        logger.info("✨ HIGH-QUALITY frame extracted with advanced enhancement applied")
+                    else:
+                        logger.info("⚡ SPEED MODE: Using simple frame extraction for faster processing")
+                        best_frame_path, _ = video_processing.extract_simple_last_frame(
+                            video_path,
+                            os.path.join(session_dir, f"chain_{chain_number:02d}_processed")
+                        )
+                        logger.info("⚡ SIMPLE frame extracted for speed")
                     
                     # Validate character consistency
                     if enable_character_consistency and character_manager:
@@ -727,14 +738,14 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                         logger.exception(f"Error updating action direction")
                         # Keep existing action direction if this fails
                     
-                    # Enhance face for better consistency
+                    # Enhance face for better consistency (use light mode to avoid API issues)
                     if enable_face_enhancement and face_enhancer and best_frame_path:
                         try:
-                            yield "progress", base_progress + step_size * 0.92, "Enhancing face for consistency..."
-                            enhanced_frame = face_enhancer.enhance_face(best_frame_path)
+                            yield "progress", base_progress + step_size * 0.92, "Enhancing face for consistency (light mode)..."
+                            enhanced_frame = face_enhancer.enhance_face(best_frame_path, light_mode=True)
                             if enhanced_frame != best_frame_path:
                                 best_frame_path = enhanced_frame
-                                logger.info("Frame face enhanced for better consistency")
+                                logger.info("Frame face enhanced with light mode for better API compatibility")
                         except Exception as e:
                             logger.error(f"Error enhancing frame: {str(e)}")
                     
@@ -789,8 +800,12 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                         logger.warning(f"Could not compare hashes: {str(e)}")
                     
                     try:
-                        new_image_url = fal_client.upload_file(best_frame_path)
-                        logger.info(f"Successfully uploaded best frame. New URL: {new_image_url}")
+                        # Use quality-optimized upload for subsequent frames based on settings
+                        use_high_quality_upload = enable_quality_preservation and quality_vs_speed in ["Maximum Quality", "Balanced"]
+                        new_image_url = fal_client.upload_file(best_frame_path, high_quality=use_high_quality_upload)
+                        
+                        quality_msg = "high-quality" if use_high_quality_upload else "standard"
+                        logger.info(f"Successfully uploaded best frame with {quality_msg} settings. New URL: {new_image_url}")
                         logger.info(f"Previous URL was: {current_image_url}")
                         
                         # VERIFICATION: Download what we just uploaded and verify it's correct
@@ -851,11 +866,24 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                             logger.exception(f"Both upload methods failed")
                             raise e
                     
+                # Ensure video compatibility for Gradio display
+                try:
+                    compatible_video_path = video_processing.ensure_video_compatibility(video_path)
+                    if compatible_video_path != video_path:
+                        logger.info(f"Created Gradio-compatible video for chain {chain_number}: {compatible_video_path}")
+                        # Use compatible video for display but keep original for stitching
+                        display_video_path = compatible_video_path
+                    else:
+                        display_video_path = video_path
+                except Exception as e:
+                    logger.warning(f"Could not create compatible video for chain {chain_number}: {str(e)}, using original")
+                    display_video_path = video_path
+                
                 # Now append the final video path (original or trimmed) to video_paths
                 video_paths.append(video_path)
                 
-                # Yield the complete chain with the formatted chain number
-                yield "chain_complete", video_path, f"Chain {chain_number} completed"
+                # Yield the complete chain with the formatted chain number (use compatible video for display)
+                yield "chain_complete", display_video_path, f"Chain {chain_number} completed"
                 
             except Exception as e:
                 logger.exception(f"Error in chain {chain_number}")
@@ -879,27 +907,126 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                     yield "error", None, f"Error in first chain: {error_msg}"
                     return
         
+        # First, create the original video compilation
+        yield "progress", 0.92, "Stitching original videos together..."
+        try:
+            final_video_path = os.path.join(session_dir, "final_story.mp4")
+            logger.info(f"Stitching original videos to create final video: {final_video_path}")
+            video_processing.stitch_videos(video_paths, final_video_path)
+            logger.info("Original video compilation completed successfully")
+        except Exception as e:
+            logger.exception("Error stitching original videos")
+            yield "error", None, f"Error stitching original videos: {str(e)}"
+            return
+        
+        # After original videos are stitched, apply face swapping if enabled
+        face_swapped_final_path = None
+        if enable_face_swapping and video_paths:
+            try:
+                yield "progress", 0.93, "Applying face swapping for consistency..."
+                
+                from utils.face_swapping import EnhancedVideoFaceConsistencyEnhancer
+                
+                # Create face consistency enhancer with swapping
+                face_consistency = EnhancedVideoFaceConsistencyEnhancer(image_path)
+                
+                # Process all videos with face swapping
+                swapped_dir = os.path.join(session_dir, "face_swapped")
+                os.makedirs(swapped_dir, exist_ok=True)
+                
+                swapped_paths, swap_report = face_consistency.process_video_chain(
+                    video_paths,
+                    swapped_dir,
+                    enhance_quality=enable_face_enhancement,
+                    swap_faces=True,
+                    create_report=True
+                )
+                
+                # Create face-swapped final video
+                if swapped_paths:
+                    face_swapped_final_path = os.path.join(session_dir, "final_story_face_swapped.mp4")
+                    logger.info(f"Stitching face-swapped videos: {face_swapped_final_path}")
+                    video_processing.stitch_videos(swapped_paths, face_swapped_final_path)
+                    
+                    # Use the face-swapped version as the primary output
+                    final_video_path = face_swapped_final_path
+                
+                # Log consistency report (handle JSON serialization issues)
+                if swap_report:
+                    try:
+                        # Convert any numpy types to Python native types for logging
+                        if 'average_similarity' in swap_report:
+                            avg_similarity = float(swap_report['average_similarity'])
+                            logger.info(f"Face swap consistency: {avg_similarity:.2f}")
+                    except Exception as json_error:
+                        logger.warning(f"Could not log face swap consistency due to JSON error: {json_error}")
+                    
+            except Exception as e:
+                logger.error(f"Error in face swapping: {str(e)}")
+                logger.info("Continuing with original video as face swapping failed")
+                # Keep the original final_video_path if swapping fails
+        
         # Create character consistency report before finalizing
         consistency_msg = ""
         if enable_character_consistency and character_manager:
             try:
-                yield "progress", 0.93, "Creating character consistency report..."
-                report = character_manager.create_validation_report(video_paths)
-                logger.info(f"Character consistency report: Average score = {report['average_consistency']:.2f}")
+                yield "progress", 0.94, "Creating character consistency report..."
+                # Use original video paths for consistency report to avoid issues
+                original_video_paths = [path for path in video_paths if os.path.exists(path)]
+                report = character_manager.create_validation_report(original_video_paths)
                 
-                # Add to output status
-                consistency_msg = f" | Character Consistency: {report['average_consistency']:.2f}/1.0"
-                if report['failed_frames']:
-                    consistency_msg += f" ({len(report['failed_frames'])} videos need attention)"
+                # Handle potential JSON serialization issues in the report
+                try:
+                    avg_consistency = float(report.get('average_consistency', 0.0))
+                    logger.info(f"Character consistency report: Average score = {avg_consistency:.2f}")
+                    
+                    # Add to output status
+                    consistency_msg = f" | Character Consistency: {avg_consistency:.2f}/1.0"
+                    if report.get('failed_frames'):
+                        failed_count = len(report['failed_frames'])
+                        consistency_msg += f" ({failed_count} videos need attention)"
+                except Exception as json_error:
+                    logger.warning(f"Could not process consistency report due to JSON error: {json_error}")
+                    consistency_msg = " | Character Consistency: Report generated with issues"
+                    
             except Exception as e:
                 logger.error(f"Error creating consistency report: {str(e)}")
         
-        # Stitch videos together
-        yield "progress", 0.95, "Stitching videos together..."
+        # Final video is already stitched above
+        yield "progress", 0.95, "Finalizing video output..."
         try:
-            final_video_path = os.path.join(session_dir, "final_story.mp4")
-            logger.info(f"Stitching videos to create final video: {final_video_path}")
-            video_processing.stitch_videos(video_paths, final_video_path)
+            # Video is already stitched above, just verify it exists
+            if not os.path.exists(final_video_path):
+                logger.error(f"Final video was not created: {final_video_path}")
+                yield "error", None, "Final video was not created successfully"
+                return
+            
+            # Apply full face enhancement to final video if requested (after all API calls)
+            if enable_face_enhancement and face_enhancer:
+                try:
+                    yield "progress", 0.97, "Applying final face enhancement to completed video..."
+                    enhanced_final_path = os.path.join(session_dir, "final_story_enhanced.mp4")
+                    enhanced_video = face_enhancer.enhance_video(
+                        final_video_path, 
+                        enhanced_final_path,
+                        skip_frames=2  # Process every other frame for speed
+                    )
+                    if enhanced_video != final_video_path:
+                        final_video_path = enhanced_video
+                        logger.info("Final video enhanced with full face enhancement")
+                except Exception as e:
+                    logger.error(f"Error enhancing final video: {str(e)}")
+                    logger.info("Continuing with non-enhanced final video")
+            
+            # Ensure video compatibility for Gradio display
+            try:
+                compatible_video_path = video_processing.ensure_video_compatibility(final_video_path)
+                if compatible_video_path != final_video_path:
+                    logger.info(f"Created Gradio-compatible video: {compatible_video_path}")
+                    final_video_path = compatible_video_path
+            except Exception as e:
+                logger.warning(f"Could not create compatible video: {str(e)}, using original")
+            
             logger.info(f"Completed story generation")
             yield "final", final_video_path, f"Story generation completed successfully!{consistency_msg}"
         except Exception as e:
@@ -912,13 +1039,26 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
         yield "error", None, f"An unexpected error occurred: {str(e)}"
 
 def create_ui():
-    # ... existing UI creation code ...
+    # Check FFmpeg availability and create warning message
+    ffmpeg_warning = ""
+    if not video_processing.FFPROBE_AVAILABLE:
+        ffmpeg_warning = """
+        
+        ⚠️ **Important Notice:** `ffprobe` is not detected on your system. While video generation will work normally, 
+        videos may not display properly in this web interface. 
+        
+        **To fix this:** Install FFmpeg from [https://ffmpeg.org/download.html](https://ffmpeg.org/download.html) 
+        and ensure both `ffmpeg.exe` and `ffprobe.exe` are in your system PATH or project directory.
+        
+        Your generated videos will still be saved successfully in the `outputs` folder regardless.
+        """
     
     with gr.Blocks(title="AI Scene Maker", css=css, theme=gr.themes.Soft()) as iface:
         gr.Markdown(
-            """
+            f"""
             # AI Scene Maker
             Upload an image and specify an action direction to generate a sequence of videos showing that action.
+            {ffmpeg_warning}
             """
         )
         
@@ -1135,6 +1275,25 @@ def create_ui():
                                 label="Enable Face Enhancement", 
                                 value=True,
                                 info="Enhance and restore faces for better quality"
+                            )
+                            enable_face_swapping = gr.Checkbox(
+                                label="Enable Face Swapping", 
+                                value=False,
+                                info="Swap faces to ensure perfect character consistency (slower)"
+                            )
+                        
+                        gr.Markdown("### Quality Settings")
+                        with gr.Row():
+                            enable_quality_preservation = gr.Checkbox(
+                                label="🎯 Maximum Quality Preservation", 
+                                value=True,
+                                info="Use lossless frame extraction and advanced quality enhancement (slower but maintains detail)"
+                            )
+                            quality_vs_speed = gr.Radio(
+                                choices=["Maximum Quality", "Balanced", "Maximum Speed"],
+                                value="Maximum Quality",
+                                label="Quality vs Speed Trade-off",
+                                info="Quality: Best settings, slower generation | Speed: Faster generation, some quality loss"
                             )
                         
                         with gr.Row():
@@ -1406,7 +1565,9 @@ def create_ui():
                 # Add Kling parameters here:
                 kling_duration, kling_aspect_ratio, kling_negative_prompt, kling_creativity,
                 # Advanced features:
-                enable_character_consistency, enable_face_enhancement,
+                enable_character_consistency, enable_face_enhancement, enable_face_swapping,
+                # Quality settings:
+                enable_quality_preservation, quality_vs_speed,
                 generation_running, cancel_requested
             ],
             outputs=[
@@ -1466,7 +1627,10 @@ def create_ui():
                 video_paths, 
                 final_video_path,
                 enable_character_consistency,
-                enable_face_enhancement
+                enable_face_enhancement,
+                enable_face_swapping,
+                enable_quality_preservation,
+                quality_vs_speed
             ]
         )
 
@@ -1484,7 +1648,9 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
                            # Add Kling parameters:
                            kling_duration="5", kling_aspect_ratio="16:9", kling_negative_prompt="", kling_creativity=0.5,
                            # Character consistency and face enhancement:
-                           enable_character_consistency=True, enable_face_enhancement=True,
+                           enable_character_consistency=True, enable_face_enhancement=True, enable_face_swapping=False,
+                           # Quality settings:
+                           enable_quality_preservation=True, quality_vs_speed="Maximum Quality",
                            gen_running=False, cancel_req=False):
     """Handle the UI aspects of chain generation, including updating UI elements during generation"""
     # Update UI for generation start
@@ -1573,7 +1739,10 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
             model_params=model_params,
             cancel_requested=lambda: cancel_req,
             enable_character_consistency=enable_character_consistency,
-            enable_face_enhancement=enable_face_enhancement
+            enable_face_enhancement=enable_face_enhancement,
+            enable_face_swapping=enable_face_swapping,
+            enable_quality_preservation=enable_quality_preservation,
+            quality_vs_speed=quality_vs_speed
         )
         
         # Process chain generation results
@@ -1948,5 +2117,8 @@ def clear_session():
         [],  # video_paths
         None,   # final_video_path
         True,   # enable_character_consistency (reset to default True)
-        True    # enable_face_enhancement (reset to default True)
+        True,   # enable_face_enhancement (reset to default True)
+        False,  # enable_face_swapping (reset to default False)
+        True,   # enable_quality_preservation (reset to default True)
+        "Maximum Quality"  # quality_vs_speed (reset to default Maximum Quality)
     ]

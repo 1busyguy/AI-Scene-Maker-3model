@@ -12,38 +12,199 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 def is_ffmpeg_available():
-    """Check if ffmpeg is available in the system."""
+    """Check if ffmpeg and ffprobe are available in the system."""
+    ffmpeg_available = False
+    ffprobe_available = False
+    
     try:
-        # Try with subprocess.run
+        # Check ffmpeg
         subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2)
-        return True
+        ffmpeg_available = True
     except (subprocess.SubprocessError, FileNotFoundError, PermissionError, OSError):
+        pass
+    
+    try:
+        # Check ffprobe (needed for Gradio video validation)
+        subprocess.run(["ffprobe", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2)
+        ffprobe_available = True
+    except (subprocess.SubprocessError, FileNotFoundError, PermissionError, OSError):
+        pass
+    
+    # If neither found, try checking Windows specific paths
+    if not ffmpeg_available or not ffprobe_available:
         try:
-            # On Windows, check if ffmpeg.exe exists in current directory or PATH
-            import os
             import platform
             if platform.system() == "Windows":
-                # Check if ffmpeg exists in the current directory
+                # Check current directory
                 if os.path.exists("ffmpeg.exe"):
-                    return True
+                    ffmpeg_available = True
+                if os.path.exists("ffprobe.exe"):
+                    ffprobe_available = True
                 
                 # Check system PATH
                 for path in os.environ["PATH"].split(os.pathsep):
-                    exe_path = os.path.join(path, "ffmpeg.exe")
-                    if os.path.exists(exe_path):
-                        return True
+                    if not ffmpeg_available and os.path.exists(os.path.join(path, "ffmpeg.exe")):
+                        ffmpeg_available = True
+                    if not ffprobe_available and os.path.exists(os.path.join(path, "ffprobe.exe")):
+                        ffprobe_available = True
                         
         except Exception as e:
-            logger.debug(f"Error checking for ffmpeg: {str(e)}")
-        
-        logger.warning("FFmpeg not found. Some video processing features may be limited.")
+            logger.debug(f"Error checking for ffmpeg/ffprobe: {str(e)}")
+    
+    # Log findings
+    if ffmpeg_available and ffprobe_available:
+        logger.info("FFmpeg and ffprobe found and available.")
+        return True
+    elif ffmpeg_available and not ffprobe_available:
+        logger.warning("FFmpeg found but ffprobe missing. Videos may not display properly in UI.")
+        return False
+    elif not ffmpeg_available and ffprobe_available:
+        logger.warning("ffprobe found but FFmpeg missing. Video processing will be limited.")
+        return False
+    else:
+        logger.warning("Neither FFmpeg nor ffprobe found. Video features will be limited.")
+        return False
+
+def is_ffprobe_available():
+    """Check specifically if ffprobe is available (needed for Gradio)."""
+    try:
+        subprocess.run(["ffprobe", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2)
+        return True
+    except (subprocess.SubprocessError, FileNotFoundError, PermissionError, OSError):
+        # On Windows, check current directory and PATH
+        try:
+            import platform
+            if platform.system() == "Windows":
+                if os.path.exists("ffprobe.exe"):
+                    return True
+                
+                for path in os.environ["PATH"].split(os.pathsep):
+                    if os.path.exists(os.path.join(path, "ffprobe.exe")):
+                        return True
+        except Exception:
+            pass
         return False
 
 FFMPEG_AVAILABLE = is_ffmpeg_available()
+FFPROBE_AVAILABLE = is_ffprobe_available()
+
 if FFMPEG_AVAILABLE:
     logger.info("FFmpeg found and available for video processing.")
 else:
     logger.warning("ffmpeg not found. Video concatenation and trimming may not work properly.")
+
+if not FFPROBE_AVAILABLE:
+    logger.warning("ffprobe not found. Videos may not display properly in Gradio UI.")
+    logger.info("To fix this, install FFmpeg with: https://ffmpeg.org/download.html")
+
+def ensure_video_compatibility(video_path, force_convert=False):
+    """
+    Ensure video is compatible with Gradio display.
+    
+    Args:
+        video_path: Path to video file
+        force_convert: Force conversion even if ffprobe is available
+        
+    Returns:
+        Path to compatible video (may be the same as input)
+    """
+    if not os.path.exists(video_path):
+        logger.error(f"Video file not found: {video_path}")
+        return video_path
+    
+    # If ffprobe is available and we're not forcing conversion, assume video is OK
+    if FFPROBE_AVAILABLE and not force_convert:
+        return video_path
+    
+    # Try creating compatible version using OpenCV first
+    try:
+        output_path = video_path.replace('.mp4', '_compatible.mp4')
+        
+        # Read video with OpenCV
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            logger.error(f"Could not open video with OpenCV: {video_path}")
+            raise Exception("OpenCV failed to open video")
+        
+        # Get video properties
+        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        
+        # Create video writer with compatible settings
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+        
+        if not out.isOpened():
+            logger.error("Could not create compatible video writer with OpenCV")
+            cap.release()
+            raise Exception("OpenCV VideoWriter failed")
+        
+        # Copy frames
+        frame_count = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            out.write(frame)
+            frame_count += 1
+        
+        cap.release()
+        out.release()
+        
+        if frame_count > 0 and os.path.exists(output_path):
+            logger.info(f"Created compatible video using OpenCV: {output_path} ({frame_count} frames)")
+            return output_path
+        else:
+            logger.warning("OpenCV conversion failed, trying moviepy...")
+            raise Exception("OpenCV conversion produced no output")
+            
+    except Exception as opencv_error:
+        logger.debug(f"OpenCV method failed: {opencv_error}")
+        
+        # Fallback to moviepy
+        try:
+            from moviepy.editor import VideoFileClip
+            
+            output_path = video_path.replace('.mp4', '_compatible.mp4')
+            logger.info("Trying moviepy for video compatibility conversion...")
+            
+            clip = VideoFileClip(video_path)
+            clip.write_videofile(
+                output_path, 
+                codec='libx264',
+                audio_codec='aac',
+                verbose=False,
+                logger=None
+            )
+            clip.close()
+            
+            if os.path.exists(output_path):
+                logger.info(f"Created compatible video using moviepy: {output_path}")
+                return output_path
+            else:
+                logger.warning("Moviepy conversion failed")
+                return video_path
+                
+        except Exception as moviepy_error:
+            logger.debug(f"Moviepy method also failed: {moviepy_error}")
+            logger.warning("Both OpenCV and moviepy failed to create compatible video")
+            
+            # Log helpful error message
+            logger.error("=" * 60)
+            logger.error("VIDEO DISPLAY ISSUE DETECTED!")
+            logger.error("Videos may not display in the UI due to missing ffprobe.")
+            logger.error("")
+            logger.error("To fix this issue:")
+            logger.error("1. Install FFmpeg from: https://ffmpeg.org/download.html")
+            logger.error("2. Make sure ffmpeg.exe and ffprobe.exe are in your PATH")
+            logger.error("3. Or place ffmpeg.exe and ffprobe.exe in your project directory")
+            logger.error("")
+            logger.error("Your videos are still being generated successfully,")
+            logger.error("they just may not display properly in the web interface.")
+            logger.error("=" * 60)
+            
+            return video_path
 
 def extract_best_frame(video_path, output_path=None):
     """
@@ -609,7 +770,21 @@ def stitch_videos(video_paths, output_path):
                     clip.close()
                 except:
                     pass
-            raise
+            
+            # Method 3: Fallback - just copy the first video as final output
+            logger.warning("Both FFmpeg and moviepy failed. Using first video as output.")
+            if video_paths:
+                import shutil
+                try:
+                    shutil.copy2(video_paths[0], output_path)
+                    logger.info(f"Copied first video to output: {output_path}")
+                    return output_path
+                except Exception as copy_error:
+                    logger.error(f"Failed to copy first video: {copy_error}")
+                    # Return the first video path as-is
+                    return video_paths[0]
+            else:
+                raise ValueError("No videos to stitch")
             
     except Exception as e:
         logger.error(f"Error stitching videos: {str(e)}")
@@ -834,3 +1009,229 @@ def extract_simple_last_frame(video_path, output_dir):
     
     # Return the frame path and the original video (no trimming for simple method)
     return last_frame_path, video_path
+
+def extract_high_quality_frame_for_chain(video_path, output_dir):
+    """
+    Extract the highest quality frame for chain continuity with maximum quality preservation.
+    
+    This function prioritizes image quality to prevent degradation across video chains:
+    - Uses lossless PNG format
+    - Applies quality enhancement
+    - Implements noise reduction
+    - Preserves maximum detail
+    
+    Args:
+        video_path: Path to the video file
+        output_dir: Directory to save outputs
+        
+    Returns:
+        tuple: (enhanced_frame_path, original_video_path)
+    """
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"Video file not found: {video_path}")
+    
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Setup paths
+    base_name = os.path.splitext(os.path.basename(video_path))[0]
+    raw_frame_path = os.path.join(output_dir, f"{base_name}_raw_frame.png")
+    enhanced_frame_path = os.path.join(output_dir, f"{base_name}_enhanced_frame.png")
+    
+    logger.info(f"HIGH-QUALITY EXTRACTION: Extracting best quality frame from: {video_path}")
+    
+    # Open the video
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Could not open video file: {video_path}")
+    
+    # Get video properties
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    
+    if frame_count <= 0:
+        raise ValueError(f"Video file has no frames: {video_path}")
+    
+    # Extract frames from the last 20% of the video for quality analysis
+    start_frame = max(0, int(frame_count * 0.8))
+    frames_to_analyze = []
+    quality_scores = []
+    frame_positions = []
+    
+    # Analyze frames for quality (not just the last frame)
+    sample_interval = max(1, (frame_count - start_frame) // 15)  # Sample up to 15 frames
+    
+    for pos in range(start_frame, frame_count, sample_interval):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
+        ret, frame = cap.read()
+        if not ret:
+            continue
+        
+        # Calculate comprehensive quality score
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
+        # Sharpness (Laplacian variance)
+        laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+        
+        # Contrast
+        _, std_dev = cv2.meanStdDev(gray)
+        contrast = std_dev[0][0]
+        
+        # Brightness balance (avoid overexposed/underexposed frames)
+        mean_val = cv2.mean(gray)[0]
+        brightness_score = 1.0 - abs((mean_val - 127.5) / 127.5)
+        
+        # Edge density (more edges = more detail)
+        edges = cv2.Canny(gray, 50, 150)
+        edge_density = np.sum(edges > 0) / (edges.shape[0] * edges.shape[1])
+        
+        # Noise estimation (lower noise = better quality)
+        noise = cv2.fastNlMeansDenoising(gray, None, 10, 7, 21)
+        noise_level = np.mean(np.abs(gray.astype(float) - noise.astype(float)))
+        noise_score = max(0, 1.0 - (noise_level / 50.0))  # Normalize noise
+        
+        # Color richness
+        b, g, r = cv2.split(frame)
+        color_variance = (np.var(r) + np.var(g) + np.var(b)) / 3
+        color_score = min(1.0, color_variance / 1000.0)
+        
+        # Combined quality score (weighted)
+        quality_score = (
+            laplacian_var * 0.25 +      # Sharpness
+            contrast * 0.2 +            # Contrast
+            brightness_score * 100 * 0.15 +  # Brightness balance
+            edge_density * 500 * 0.15 + # Edge detail
+            noise_score * 100 * 0.1 +   # Low noise
+            color_score * 100 * 0.15    # Color richness
+        )
+        
+        frames_to_analyze.append(frame)
+        quality_scores.append(quality_score)
+        frame_positions.append(pos)
+        
+        logger.debug(f"Frame {pos}: sharpness={laplacian_var:.1f}, contrast={contrast:.1f}, "
+                    f"brightness={brightness_score:.2f}, edges={edge_density:.3f}, "
+                    f"noise={noise_score:.2f}, color={color_score:.2f}, total={quality_score:.1f}")
+    
+    cap.release()
+    
+    if not frames_to_analyze:
+        # Fallback to last frame if analysis failed
+        cap = cv2.VideoCapture(video_path)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_count - 1)
+        ret, frame = cap.read()
+        cap.release()
+        
+        if not ret:
+            raise ValueError(f"Failed to read any frame from video: {video_path}")
+        
+        frames_to_analyze = [frame]
+        quality_scores = [0.0]
+        frame_positions = [frame_count - 1]
+    
+    # Select the highest quality frame
+    best_idx = quality_scores.index(max(quality_scores))
+    best_frame = frames_to_analyze[best_idx]
+    best_position = frame_positions[best_idx]
+    best_score = quality_scores[best_idx]
+    
+    logger.info(f"SELECTED FRAME: position {best_position}/{frame_count-1}, quality score: {best_score:.1f}")
+    
+    # Save raw frame as lossless PNG
+    success = cv2.imwrite(raw_frame_path, best_frame, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+    if not success:
+        raise IOError(f"Failed to save raw frame to {raw_frame_path}")
+    
+    # Apply quality enhancement
+    enhanced_frame_path = enhance_frame_quality_advanced(raw_frame_path, enhanced_frame_path)
+    
+    # Log file sizes for debugging
+    raw_size = os.path.getsize(raw_frame_path) / 1024  # KB
+    enhanced_size = os.path.getsize(enhanced_frame_path) / 1024  # KB
+    logger.info(f"QUALITY PRESERVATION: Raw frame: {raw_size:.1f}KB → Enhanced: {enhanced_size:.1f}KB")
+    
+    return enhanced_frame_path, video_path
+
+def enhance_frame_quality_advanced(input_path, output_path):
+    """
+    Apply advanced quality enhancement to a frame to combat video chain degradation.
+    
+    Args:
+        input_path: Path to input frame
+        output_path: Path to save enhanced frame
+        
+    Returns:
+        Path to enhanced frame
+    """
+    try:
+        from PIL import Image, ImageEnhance, ImageFilter
+        import numpy as np
+        
+        # Open image with PIL for high-quality processing
+        img = Image.open(input_path).convert("RGB")
+        original_size = img.size
+        
+        # 1. Upscale slightly to add detail before enhancement
+        upscale_factor = 1.1
+        new_size = (int(original_size[0] * upscale_factor), int(original_size[1] * upscale_factor))
+        img = img.resize(new_size, Image.Resampling.LANCZOS)
+        
+        # 2. Noise reduction (very light to preserve detail)
+        img_array = np.array(img)
+        
+        # Convert to OpenCV format for noise reduction
+        img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        
+        # Apply light denoising
+        denoised = cv2.fastNlMeansDenoisingColored(img_cv, None, 3, 3, 7, 21)
+        
+        # Convert back to PIL
+        img = Image.fromarray(cv2.cvtColor(denoised, cv2.COLOR_BGR2RGB))
+        
+        # 3. Enhance sharpness (moderate)
+        enhancer = ImageEnhance.Sharpness(img)
+        img = enhancer.enhance(1.15)
+        
+        # 4. Enhance contrast (light)
+        enhancer = ImageEnhance.Contrast(img)
+        img = enhancer.enhance(1.08)
+        
+        # 5. Enhance color saturation (very light)
+        enhancer = ImageEnhance.Color(img)
+        img = enhancer.enhance(1.03)
+        
+        # 6. Apply unsharp mask for detail enhancement
+        img_array = np.array(img)
+        
+        # Create unsharp mask
+        gaussian = cv2.GaussianBlur(img_array, (3, 3), 1.0)
+        unsharp_mask = cv2.addWeighted(img_array, 1.5, gaussian, -0.5, 0)
+        
+        # Ensure values are in valid range
+        unsharp_mask = np.clip(unsharp_mask, 0, 255)
+        img = Image.fromarray(unsharp_mask.astype(np.uint8))
+        
+        # 7. Resize back to original dimensions with high-quality resampling
+        img = img.resize(original_size, Image.Resampling.LANCZOS)
+        
+        # 8. Final brightness/contrast adjustment based on image analysis
+        img_array = np.array(img.convert("L"))  # Convert to grayscale for analysis
+        mean_brightness = np.mean(img_array)
+        
+        # Adjust if too dark or too bright
+        if mean_brightness < 100:  # Too dark
+            enhancer = ImageEnhance.Brightness(img)
+            img = enhancer.enhance(1.05)
+        elif mean_brightness > 180:  # Too bright
+            enhancer = ImageEnhance.Brightness(img)
+            img = enhancer.enhance(0.98)
+        
+        # Save enhanced image with maximum quality
+        img.save(output_path, format='PNG', optimize=False, compress_level=0)
+        
+        logger.info(f"ADVANCED ENHANCEMENT applied: {output_path}")
+        return output_path
+        
+    except Exception as e:
+        logger.error(f"Advanced enhancement failed: {str(e)}, using basic enhancement")
+        # Fallback to basic enhancement
+        return enhance_frame_quality(input_path, output_path)
