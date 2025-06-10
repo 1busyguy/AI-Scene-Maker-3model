@@ -661,11 +661,11 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                             
                             if score < 0.6:  # Low consistency
                                 logger.warning(f"Low character consistency detected: {score}")
-                                yield "progress", base_progress + step_size * 0.87, 
+                                yield "progress", base_progress + step_size * 0.87, \
                                       f"⚠️ Character consistency: {score:.2f} - may need regeneration"
                             else:
                                 logger.info(f"Good character consistency: {score}")
-                                yield "progress", base_progress + step_size * 0.87, 
+                                yield "progress", base_progress + step_size * 0.87, \
                                       f"✅ Character consistency: {score:.2f}"
                         except Exception as e:
                             logger.error(f"Error validating consistency: {str(e)}")
@@ -1226,6 +1226,79 @@ def create_ui():
                     fn=save_api_keys,
                     inputs=[openai_api_key, fal_api_key],
                     outputs=[keys_status]
+                )
+            
+            # Character Consistency Report tab
+            with gr.TabItem("Consistency Report", id="report"):
+                gr.Markdown("""
+                ### Character Consistency Analysis
+                View detailed reports on character consistency across video chains.
+                """)
+                
+                report_display = gr.JSON(label="Character Consistency Report")
+                
+                with gr.Row():
+                    refresh_report_btn = gr.Button("Refresh Report", variant="secondary")
+                    clear_report_btn = gr.Button("Clear Report", variant="secondary")
+                
+                report_status = gr.Markdown("Click 'Refresh Report' to load the latest consistency analysis.")
+                
+                def load_report():
+                    """Load the character consistency report from the output directory"""
+                    try:
+                        # Look for the most recent report in any session directory
+                        import glob
+                        
+                        # Pattern to find all character validation reports
+                        report_pattern = os.path.join(OUTPUT_DIR, "*/character_validation_report.json")
+                        report_files = glob.glob(report_pattern)
+                        
+                        if not report_files:
+                            # Also check for report in the main output directory
+                            main_report_path = os.path.join(OUTPUT_DIR, "character_validation_report.json")
+                            if os.path.exists(main_report_path):
+                                report_files = [main_report_path]
+                        
+                        if report_files:
+                            # Get the most recent report file
+                            latest_report = max(report_files, key=os.path.getmtime)
+                            
+                            with open(latest_report, 'r') as f:
+                                report_data = json.load(f)
+                            
+                            # Add metadata about the report
+                            report_data['_metadata'] = {
+                                'report_file': latest_report,
+                                'last_modified': os.path.getmtime(latest_report),
+                                'file_size': os.path.getsize(latest_report)
+                            }
+                            
+                            return report_data, "Report loaded successfully!"
+                        else:
+                            return {
+                                "message": "No character consistency report found",
+                                "status": "No reports available",
+                                "suggestion": "Generate a video with character consistency enabled to create a report"
+                            }, "No reports found. Generate videos with character consistency enabled."
+                    
+                    except Exception as e:
+                        return {
+                            "error": str(e),
+                            "message": "Failed to load consistency report"
+                        }, f"Error loading report: {str(e)}"
+                
+                def clear_report():
+                    """Clear the displayed report"""
+                    return {}, "Report display cleared."
+                
+                refresh_report_btn.click(
+                    fn=load_report,
+                    outputs=[report_display, report_status]
+                )
+                
+                clear_report_btn.click(
+                    fn=clear_report,
+                    outputs=[report_display, report_status]
                 )
 
         # Connect the image upload event
