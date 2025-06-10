@@ -1129,14 +1129,14 @@ def create_ui():
                         gr.Markdown("### Advanced Features")
                         with gr.Row():
                             enable_character_consistency = gr.Checkbox(
-                                label="Character Consistency", 
+                                label="Enable Character Consistency", 
                                 value=True,
-                                info="Enforce character appearance consistency across video chains"
+                                info="Use AI to maintain character appearance across chains"
                             )
                             enable_face_enhancement = gr.Checkbox(
-                                label="Face Enhancement", 
+                                label="Enable Face Enhancement", 
                                 value=True,
-                                info="Enhance face quality and consistency between chains"
+                                info="Enhance and restore faces for better quality"
                             )
                         
                         with gr.Row():
