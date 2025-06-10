@@ -1,5 +1,5 @@
 gradio==5.33.0
-gradio_clien==1.10.2
+gradio_client==1.10.2
 groovy==0.1.2
 safehttpx==0.1.6
 fal-client==0.4.1
