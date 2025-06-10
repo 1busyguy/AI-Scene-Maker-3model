@@ -124,7 +124,12 @@ class FaceEnhancer:
             
             # Save enhanced image
             if output_path is None:
-                output_path = image_path.replace('.', '_enhanced.')
+                # Properly construct output path
+                base_path, ext = os.path.splitext(image_path)
+                output_path = f"{base_path}_enhanced{ext}"
+            
+            # Ensure output directory exists
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
             
             cv2.imwrite(output_path, restored_img)
             logger.info(f"Enhanced face saved to: {output_path}")
@@ -163,7 +168,8 @@ class FaceEnhancer:
             
             # Prepare output
             if output_path is None:
-                output_path = video_path.replace('.mp4', '_enhanced.mp4')
+                base_path, ext = os.path.splitext(video_path)
+                output_path = f"{base_path}_enhanced{ext}"
             
             # Create temporary directory for frames
             temp_dir = tempfile.mkdtemp()
@@ -315,7 +321,11 @@ class FaceEnhancer:
             
             # Save
             if output_path is None:
-                output_path = image_path.replace('.', '_face_enhanced.')
+                base_path, ext = os.path.splitext(image_path)
+                output_path = f"{base_path}_face_enhanced{ext}"
+            
+            # Ensure output directory exists
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
             
             cv2.imwrite(output_path, img)
             return output_path

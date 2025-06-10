@@ -74,13 +74,21 @@ class CharacterConsistencyManager:
                     enforce_detection=False
                 )
                 
+                # Handle different result formats
+                if isinstance(analysis, list) and len(analysis) > 0:
+                    analysis_data = analysis[0]
+                elif isinstance(analysis, dict):
+                    analysis_data = analysis
+                else:
+                    raise ValueError("Unexpected analysis result format")
+                
                 # Store character profile
                 self.character_profile = {
-                    'age': analysis[0]['age'],
-                    'gender': analysis[0]['gender'],
-                    'dominant_race': analysis[0]['dominant_race'],
-                    'dominant_emotion': analysis[0]['dominant_emotion'],
-                    'face_region': analysis[0]['region']
+                    'age': analysis_data.get('age', 25),
+                    'gender': analysis_data.get('dominant_gender', analysis_data.get('gender', 'unknown')),
+                    'dominant_race': analysis_data.get('dominant_race', 'unknown'),
+                    'dominant_emotion': analysis_data.get('dominant_emotion', 'neutral'),
+                    'face_region': analysis_data.get('region', {})
                 }
             except Exception as e:
                 logger.warning(f"DeepFace analysis failed: {str(e)}")
