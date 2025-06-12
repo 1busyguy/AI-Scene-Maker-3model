@@ -1,437 +1,457 @@
-# utils/enhanced_prompts.py
+# utils/enhanced_prompts.py - Modernized for LangChain v0.1+
 """
-Enhanced Prompt Engineering Module
-Implements character locking and consistency in prompts
+Enhanced prompt generation using modern LangChain LCEL (LangChain Expression Language)
+Replaces deprecated LLMChain with RunnableSequence (prompt | llm pattern)
 """
 
 import logging
-from typing import Dict, Optional, List
+import os
+import time
+from typing import Dict, List, Optional, Any, Union
+import openai
 from langchain_openai import ChatOpenAI
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
-import json
+from langchain.prompts import PromptTemplate, ChatPromptTemplate
+from langchain.schema import HumanMessage, SystemMessage
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough, RunnableSequence
+import config
 
 logger = logging.getLogger(__name__)
 
-class CharacterLockedPromptGenerator:
-    """Generate prompts with strong character consistency constraints"""
+class ModernEnhancedPromptGenerator:
+    """
+    Modern prompt generator using LangChain LCEL instead of deprecated LLMChain
+    """
     
-    def __init__(self, model: str = "gpt-4.1-mini", temperature: float = 0.7):
-        """Initialize the prompt generator"""
-        self.llm = ChatOpenAI(model=model, temperature=temperature)
-        self.character_description = None
-        self.character_lock_template = None
-        self._initialize_templates()
-    
-    def _initialize_templates(self):
-        """Initialize prompt templates with character locking"""
+    def __init__(self, model_name: str = "gpt-4o-mini", temperature: float = 0.7):
+        """
+        Initialize with modern LangChain components
         
-        # Character lock template - to be inserted into every prompt
-        self.character_lock_template = """
-CRITICAL CHARACTER CONSISTENCY REQUIREMENTS:
-The main character MUST maintain EXACT consistency with:
-- Physical Appearance: {appearance}
-- Facial Features: {facial_features}
-- Clothing: {clothing}
-- Distinctive Features: {distinctive_features}
-- Body Type and Posture: {body_type}
-- Hair Style and Color: {hair_details}
-
-ABSOLUTE RULES:
-1. The character's face, body proportions, and clothing MUST remain IDENTICAL
-2. NO changes to hair color, style, or length
-3. NO changes to clothing items or colors
-4. NO changes to skin tone or facial structure
-5. The character should appear as if filmed in continuous footage
-
-REFERENCE ANCHORS:
-- This is the SAME person continuing the SAME action
-- Think of this as the next few seconds of footage of the EXACT same person
-- Any deviation from the character's appearance is a FAILURE
-"""
-
-        # Main prompt template with character locking
-        self.main_prompt_template = PromptTemplate(
-            input_variables=[
-                "action_direction", "scene_vision", "frame_description",
-                "character_lock", "story_phase", "previous_actions",
-                "continuity_notes"
-            ],
-            template="""You are a cinematographer creating a prompt for the next shot in a continuous sequence.
-
-{character_lock}
-
-CURRENT SCENE STATE:
-Previous Frame: {frame_description}
-Story Phase: {story_phase}
-Previous Actions: {previous_actions}
-
-CONTINUITY NOTES: {continuity_notes}
-
-REQUIRED ACTION: {action_direction}
-
-SCENE VISION: {scene_vision}
-
-Create a concise, single-paragraph prompt (max 75 words) that:
-1. EXPLICITLY mentions the character's unchanged appearance details
-2. Describes ONLY the next immediate action/movement
-3. Maintains perfect visual continuity
-4. Uses specific character descriptors from the Character Lock
-
-Format: Direct instruction starting with the character description, then the action.
-Example: "The [exact character description] continues to [specific action]..."
-
-Prompt:"""
-        )
+        Args:
+            model_name: OpenAI model to use
+            temperature: Creativity level (0.0 = deterministic, 1.0 = creative)
+        """
+        self.model_name = model_name
+        self.temperature = temperature
         
-        # Validation prompt to check generated prompts
-        self.validation_prompt_template = PromptTemplate(
-            input_variables=["generated_prompt", "character_description"],
-            template="""Analyze this prompt for character consistency:
-
-PROMPT: {generated_prompt}
-
-REQUIRED CHARACTER: {character_description}
-
-Check if the prompt:
-1. Explicitly mentions key character features
-2. Avoids any language that could change appearance
-3. Maintains continuity
-
-Return JSON:
-{{
-    "has_character_description": true/false,
-    "consistency_score": 0-10,
-    "issues": ["list of issues"],
-    "improved_prompt": "enhanced version if needed"
-}}"""
-        )
-    
-    def set_character_description(self, character_details: Dict[str, str]):
-        """Set the character description to be locked across all prompts"""
-        self.character_description = character_details
-        
-        # Create the character lock section
-        self.character_lock = self.character_lock_template.format(
-            appearance=character_details.get('appearance', 'consistent appearance'),
-            facial_features=character_details.get('facial_features', 'consistent facial features'),
-            clothing=character_details.get('clothing', 'same clothing'),
-            distinctive_features=character_details.get('distinctive_features', 'same distinctive features'),
-            body_type=character_details.get('body_type', 'same build and posture'),
-            hair_details=character_details.get('hair_details', 'same hairstyle and color')
-        )
-        
-        logger.info(f"Character lock set with details: {character_details}")
-    
-    def generate_locked_prompt(
-        self,
-        action_direction: str,
-        scene_vision: str,
-        frame_description: str,
-        story_phase: str,
-        previous_actions: List[str] = None,
-        current_chain: int = 0,
-        total_chains: int = 1
-    ) -> str:
-        """Generate a prompt with character locking enforced"""
-        
-        if not self.character_description:
-            raise ValueError("Character description must be set before generating prompts")
-        
-        # Build continuity notes based on chain position
-        continuity_notes = self._generate_continuity_notes(current_chain, total_chains)
-        
-        # Format previous actions
-        previous_actions_str = ""
-        if previous_actions:
-            previous_actions_str = " → ".join(previous_actions[-3:])  # Last 3 actions
-        
-        # Generate the prompt
-        prompt_chain = LLMChain(llm=self.llm, prompt=self.main_prompt_template)
-        
-        generated_prompt = prompt_chain.run(
-            action_direction=action_direction,
-            scene_vision=scene_vision,
-            frame_description=frame_description,
-            character_lock=self.character_lock,
-            story_phase=story_phase,
-            previous_actions=previous_actions_str,
-            continuity_notes=continuity_notes
-        ).strip()
-        
-        # Validate and enhance the prompt
-        validated_prompt = self._validate_and_enhance_prompt(generated_prompt)
-        
-        logger.info(f"Generated character-locked prompt: {validated_prompt}")
-        
-        return validated_prompt
-    
-    def _generate_continuity_notes(self, current_chain: int, total_chains: int) -> str:
-        """Generate specific continuity notes based on chain position"""
-        
-        progress = (current_chain / total_chains) * 100
-        
-        if current_chain == 0:
-            return "First shot - establish character clearly with all details visible"
-        elif current_chain == total_chains - 1:
-            return "Final shot - maintain exact character appearance for closure"
-        elif progress < 33:
-            return "Early sequence - reinforce character appearance details"
-        elif progress < 66:
-            return "Mid sequence - maintain established character look precisely"
-        else:
-            return "Late sequence - ensure character consistency for impact"
-    
-    def _validate_and_enhance_prompt(self, prompt: str) -> str:
-        """Validate the prompt has character details and enhance if needed"""
-        
-        validation_chain = LLMChain(llm=self.llm, prompt=self.validation_prompt_template)
-        
+        # Initialize modern LangChain LLM
         try:
-            validation_result = validation_chain.run(
-                generated_prompt=prompt,
-                character_description=json.dumps(self.character_description)
+            self.llm = ChatOpenAI(
+                model=model_name,
+                temperature=temperature,
+                openai_api_key=config.OPENAI_API_KEY,
+                max_tokens=500,  # Reasonable limit for prompts
+                timeout=30       # Prevent hanging
             )
-            
-            # Parse the validation result
-            result = json.loads(validation_result)
-            
-            if result['consistency_score'] < 8 or not result['has_character_description']:
-                # Use the improved prompt if provided
-                if result.get('improved_prompt'):
-                    return result['improved_prompt']
-                else:
-                    # Manually enhance the prompt
-                    return self._manually_enhance_prompt(prompt)
-            
-            return prompt
-            
+            logger.info(f"Modern LangChain LLM initialized: {model_name}")
         except Exception as e:
-            logger.warning(f"Validation failed, using original prompt: {str(e)}")
-            return prompt
+            logger.error(f"Failed to initialize LangChain LLM: {str(e)}")
+            self.llm = None
+        
+        # Create modern prompt templates
+        self._initialize_modern_templates()
+        
+        # Create modern chains using LCEL
+        self._create_modern_chains()
     
-    def _manually_enhance_prompt(self, prompt: str) -> str:
-        """Manually add character details to the prompt"""
+    def _initialize_modern_templates(self):
+        """Initialize modern prompt templates"""
         
-        # Extract key character details
-        char_desc_parts = []
-        
-        if self.character_description.get('appearance'):
-            char_desc_parts.append(self.character_description['appearance'])
-        
-        if self.character_description.get('clothing'):
-            char_desc_parts.append(self.character_description['clothing'])
-        
-        if self.character_description.get('distinctive_features'):
-            char_desc_parts.append(f"with {self.character_description['distinctive_features']}")
-        
-        character_string = ", ".join(char_desc_parts)
-        
-        # Inject character description at the beginning
-        if not any(desc in prompt.lower() for desc in ['person', 'character', 'individual']):
-            enhanced = f"The {character_string} {prompt}"
-        else:
-            # Replace generic terms with specific description
-            enhanced = prompt
-            for generic in ['person', 'character', 'individual', 'figure']:
-                if generic in enhanced.lower():
-                    enhanced = enhanced.lower().replace(generic, character_string)
-                    break
-        
-        return enhanced
-    
-    def create_chain_transition_prompt(
-        self,
-        previous_prompt: str,
-        next_action: str,
-        transition_type: str = "smooth"
-    ) -> str:
-        """Create a prompt specifically for transitions between chains"""
-        
-        transition_template = PromptTemplate(
-            input_variables=["character_lock", "previous_prompt", "next_action", "transition_type"],
-            template="""Create a transition prompt that bridges two video segments.
+        # Main prompt template using ChatPromptTemplate
+        self.main_chat_template = ChatPromptTemplate.from_messages([
+            ("system", """You are an expert AI video prompt engineer specializing in creating cinematic, detailed prompts for AI video generation.
 
-{character_lock}
+Your task is to transform basic input into compelling, cinematic video prompts that will produce high-quality, visually stunning videos.
 
-PREVIOUS SEGMENT ENDED WITH: {previous_prompt}
-NEXT ACTION NEEDED: {next_action}
-TRANSITION TYPE: {transition_type}
+REQUIREMENTS:
+- Create vivid, cinematic descriptions
+- Include specific visual details (lighting, camera angles, atmosphere)
+- Maintain consistency with the provided theme and tone
+- Keep prompts concise but descriptive (max 150 words)
+- Focus on visual elements that translate well to video
+- Include motion and dynamic elements when appropriate
 
-Generate a prompt that:
-1. Creates a {transition_type} transition
-2. Maintains EXACT character appearance
-3. Naturally progresses the action
-4. Is under 50 words
+QUALITY FOCUS:
+- Emphasize "high quality", "detailed", "cinematic" elements
+- Specify lighting conditions (golden hour, dramatic lighting, etc.)
+- Include camera movements or angles when relevant
+- Add atmospheric details (mist, particles, weather, etc.)"""),
+            
+            ("human", """Transform this into a cinematic video prompt:
 
-Transition Prompt:"""
-        )
-        
-        chain = LLMChain(llm=self.llm, prompt=transition_template)
-        
-        transition_prompt = chain.run(
-            character_lock=self.character_lock,
-            previous_prompt=previous_prompt,
-            next_action=next_action,
-            transition_type=transition_type
-        ).strip()
-        
-        return transition_prompt
-    
-    def generate_character_emphasis_modifiers(self) -> List[str]:
-        """Generate a list of emphasis modifiers to strengthen character consistency"""
-        
-        modifiers = []
-        
-        # Base modifiers
-        modifiers.extend([
-            "maintaining exact appearance",
-            "with unchanged features",
-            "preserving all visual details",
-            "keeping consistent look"
+Action/Direction: {action_direction}
+Theme: {theme}
+Background/Setting: {background}
+Main Subject: {main_subject}
+Tone and Color: {tone_and_color}
+Scene Vision: {scene_vision}
+
+Create a compelling video prompt that captures the essence of this vision with cinematic quality.""")
         ])
         
-        # Add specific modifiers based on character description
-        if self.character_description:
-            if self.character_description.get('clothing'):
-                modifiers.append(f"still wearing {self.character_description['clothing']}")
+        # Style-specific templates
+        self.style_templates = {
+            "cinematic": ChatPromptTemplate.from_messages([
+                ("system", "You specialize in cinematic video prompts with film-like quality, dramatic lighting, and professional cinematography."),
+                ("human", "Create a cinematic video prompt: {input_text}")
+            ]),
             
-            if self.character_description.get('hair_details'):
-                modifiers.append(f"with same {self.character_description['hair_details']}")
+            "artistic": ChatPromptTemplate.from_messages([
+                ("system", "You create artistic, visually striking video prompts with unique visual styles, creative compositions, and artistic flair."),
+                ("human", "Create an artistic video prompt: {input_text}")
+            ]),
             
-            if self.character_description.get('distinctive_features'):
-                modifiers.append(f"showing {self.character_description['distinctive_features']}")
+            "natural": ChatPromptTemplate.from_messages([
+                ("system", "You create natural, realistic video prompts focusing on authentic lighting, natural movements, and realistic scenarios."),
+                ("human", "Create a natural, realistic video prompt: {input_text}")
+            ]),
+            
+            "dynamic": ChatPromptTemplate.from_messages([
+                ("system", "You specialize in dynamic, action-packed video prompts with movement, energy, and visual excitement."),
+                ("human", "Create a dynamic video prompt with movement: {input_text}")
+            ])
+        }
         
-        return modifiers
+        # Continuation prompt template
+        self.continuation_template = ChatPromptTemplate.from_messages([
+            ("system", """You are an expert at creating video prompt continuations that maintain visual consistency while progressing the narrative.
+
+REQUIREMENTS:
+- Maintain visual consistency with the previous prompt
+- Create smooth narrative progression
+- Keep the same tone, lighting, and atmosphere
+- Introduce subtle changes or developments
+- Ensure the continuation feels natural and connected"""),
+            
+            ("human", """Create a continuation prompt based on:
+
+Previous prompt: {previous_prompt}
+Continuation direction: {continuation_direction}
+Maintain consistency in: {consistency_elements}
+
+Generate a prompt that continues the story while maintaining visual consistency.""")
+        ])
     
-    def create_negative_prompt(self, existing_negative: str = "") -> str:
-        """Create a negative prompt to prevent character changes"""
+    def _create_modern_chains(self):
+        """Create modern LangChain chains using LCEL"""
+        if not self.llm:
+            logger.error("Cannot create chains without LLM")
+            return
         
-        # Core character consistency negatives (shorter list)
-        negative_elements = [
-            "different person",
-            "changed appearance", 
-            "different clothes",
-            "altered features",
-            "inconsistent character"
+        try:
+            # Output parser
+            output_parser = StrOutputParser()
+            
+            # Main chain using LCEL (prompt | llm | parser)
+            self.main_chain = self.main_chat_template | self.llm | output_parser
+            
+            # Style-specific chains
+            self.style_chains = {}
+            for style, template in self.style_templates.items():
+                self.style_chains[style] = template | self.llm | output_parser
+            
+            # Continuation chain
+            self.continuation_chain = self.continuation_template | self.llm | output_parser
+            
+            logger.info("Modern LangChain LCEL chains created successfully")
+            
+        except Exception as e:
+            logger.error(f"Failed to create modern chains: {str(e)}")
+            self.main_chain = None
+            self.style_chains = {}
+            self.continuation_chain = None
+    
+    def generate_enhanced_prompt(self, action_direction: str, theme: str = "", 
+                                background: str = "", main_subject: str = "", 
+                                tone_and_color: str = "", scene_vision: str = "",
+                                style: str = "cinematic") -> str:
+        """
+        Generate enhanced prompt using modern LangChain LCEL
+        
+        Args:
+            action_direction: Main action or direction
+            theme: Overall theme
+            background: Background/setting description
+            main_subject: Main subject description
+            tone_and_color: Tone and color preferences
+            scene_vision: Overall scene vision
+            style: Style preference (cinematic, artistic, natural, dynamic)
+            
+        Returns:
+            Enhanced prompt string
+        """
+        if not self.main_chain:
+            logger.warning("Modern chain not available, using fallback")
+            return self._fallback_prompt_generation(action_direction, theme, background, 
+                                                  main_subject, tone_and_color, scene_vision)
+        
+        try:
+            # Prepare input data
+            input_data = {
+                "action_direction": action_direction or "cinematic scene",
+                "theme": theme or "dramatic",
+                "background": background or "atmospheric setting",
+                "main_subject": main_subject or "the main focus",
+                "tone_and_color": tone_and_color or "rich, cinematic colors",
+                "scene_vision": scene_vision or "visually compelling"
+            }
+            
+            # Use modern invoke method instead of deprecated run
+            logger.info(f"Generating enhanced prompt with style: {style}")
+            start_time = time.time()
+            
+            # Generate using main chain
+            enhanced_prompt = self.main_chain.invoke(input_data)
+            
+            # Apply style-specific enhancement if requested and available
+            if style in self.style_chains and style != "cinematic":
+                style_input = {"input_text": enhanced_prompt}
+                enhanced_prompt = self.style_chains[style].invoke(style_input)
+            
+            generation_time = time.time() - start_time
+            logger.info(f"Enhanced prompt generated in {generation_time:.2f}s")
+            
+            # Post-process the prompt
+            enhanced_prompt = self._post_process_prompt(enhanced_prompt)
+            
+            return enhanced_prompt
+            
+        except Exception as e:
+            logger.error(f"Enhanced prompt generation failed: {str(e)}")
+            return self._fallback_prompt_generation(action_direction, theme, background, 
+                                                  main_subject, tone_and_color, scene_vision)
+    
+    def generate_continuation_prompt(self, previous_prompt: str, continuation_direction: str,
+                                   consistency_elements: str = "lighting, atmosphere, style") -> str:
+        """
+        Generate continuation prompt using modern LangChain LCEL
+        
+        Args:
+            previous_prompt: The previous prompt to continue from
+            continuation_direction: Direction for the continuation
+            consistency_elements: Elements to maintain consistency in
+            
+        Returns:
+            Continuation prompt string
+        """
+        if not self.continuation_chain:
+            logger.warning("Continuation chain not available, using fallback")
+            return self._fallback_continuation(previous_prompt, continuation_direction)
+        
+        try:
+            input_data = {
+                "previous_prompt": previous_prompt,
+                "continuation_direction": continuation_direction,
+                "consistency_elements": consistency_elements
+            }
+            
+            logger.info("Generating continuation prompt")
+            start_time = time.time()
+            
+            # Use modern invoke method
+            continuation_prompt = self.continuation_chain.invoke(input_data)
+            
+            generation_time = time.time() - start_time
+            logger.info(f"Continuation prompt generated in {generation_time:.2f}s")
+            
+            # Post-process
+            continuation_prompt = self._post_process_prompt(continuation_prompt)
+            
+            return continuation_prompt
+            
+        except Exception as e:
+            logger.error(f"Continuation prompt generation failed: {str(e)}")
+            return self._fallback_continuation(previous_prompt, continuation_direction)
+    
+    def _post_process_prompt(self, prompt: str) -> str:
+        """Post-process generated prompt for quality and consistency"""
+        if not prompt:
+            return prompt
+        
+        # Clean up the prompt
+        prompt = prompt.strip()
+        
+        # Ensure prompt isn't too long (most video models have limits)
+        if len(prompt) > 400:
+            # Try to truncate at a sentence boundary
+            sentences = prompt.split('. ')
+            truncated = ""
+            for sentence in sentences:
+                if len(truncated + sentence + '. ') <= 400:
+                    truncated += sentence + '. '
+                else:
+                    break
+            if truncated:
+                prompt = truncated.rstrip('. ') + '.'
+            else:
+                prompt = prompt[:400] + "..."
+        
+        # Ensure quality keywords are present
+        quality_keywords = ["high quality", "detailed", "cinematic", "professional"]
+        prompt_lower = prompt.lower()
+        
+        if not any(keyword in prompt_lower for keyword in quality_keywords):
+            prompt = f"{prompt}, high quality, detailed"
+        
+        return prompt
+    
+    def _fallback_prompt_generation(self, action_direction: str, theme: str, 
+                                   background: str, main_subject: str, 
+                                   tone_and_color: str, scene_vision: str) -> str:
+        """Fallback prompt generation without LLM"""
+        logger.info("Using fallback prompt generation")
+        
+        # Combine elements intelligently
+        elements = []
+        
+        if main_subject:
+            elements.append(main_subject)
+        
+        if action_direction:
+            elements.append(f"performing {action_direction}")
+        
+        if background:
+            elements.append(f"in {background}")
+        
+        if theme:
+            elements.append(f"with {theme} theme")
+        
+        if tone_and_color:
+            elements.append(f"featuring {tone_and_color}")
+        
+        if scene_vision:
+            elements.append(f"creating {scene_vision}")
+        
+        # Add quality enhancements
+        quality_elements = [
+            "high quality",
+            "detailed",
+            "cinematic lighting",
+            "professional cinematography"
         ]
         
-        # Add specific negatives based on character (but keep it short)
-        if self.character_description:
-            if 'hair_color' in str(self.character_description):
-                # Add only one opposite hair color to keep it concise
-                if 'blonde' in str(self.character_description).lower():
-                    negative_elements.append("dark hair")
-                elif 'dark' in str(self.character_description).lower():
-                    negative_elements.append("blonde hair")
+        # Combine everything
+        base_prompt = ", ".join(elements) if elements else "cinematic scene"
+        quality_suffix = ", ".join(quality_elements)
         
-        # Create the character consistency negative prompt
-        character_negative = ", ".join(negative_elements)
+        return f"{base_prompt}, {quality_suffix}"
+    
+    def _fallback_continuation(self, previous_prompt: str, continuation_direction: str) -> str:
+        """Fallback continuation without LLM"""
+        logger.info("Using fallback continuation generation")
         
-        # Combine with existing negative prompt, avoiding duplicates
-        if existing_negative:
-            # Split existing negative into individual terms
-            existing_terms = [term.strip() for term in existing_negative.split(",")]
-            new_terms = [term.strip() for term in character_negative.split(",")]
+        # Extract key elements from previous prompt
+        base_elements = previous_prompt.split(',')[:3]  # Take first 3 elements
+        base = ', '.join(base_elements)
+        
+        # Add continuation
+        continuation = f"{base}, then {continuation_direction}, maintaining consistent lighting and atmosphere, high quality, detailed"
+        
+        return continuation
+    
+    def batch_generate_prompts(self, prompt_requests: List[Dict[str, Any]]) -> List[str]:
+        """
+        Generate multiple prompts efficiently using modern batch processing
+        
+        Args:
+            prompt_requests: List of dictionaries with prompt generation parameters
             
-            # Only add terms that aren't already present
-            unique_new_terms = [term for term in new_terms if term not in existing_terms]
+        Returns:
+            List of generated prompts
+        """
+        if not self.main_chain:
+            logger.warning("Chain not available, using fallback for batch generation")
+            return [self._fallback_prompt_generation(**req) for req in prompt_requests]
+        
+        results = []
+        
+        try:
+            logger.info(f"Batch generating {len(prompt_requests)} prompts")
+            start_time = time.time()
             
-            if unique_new_terms:
-                combined = existing_negative + ", " + ", ".join(unique_new_terms)
-            else:
-                combined = existing_negative
+            # Process in batches to avoid rate limits
+            batch_size = 5
+            for i in range(0, len(prompt_requests), batch_size):
+                batch = prompt_requests[i:i + batch_size]
+                
+                batch_results = []
+                for req in batch:
+                    try:
+                        # Use the regular generation method
+                        result = self.generate_enhanced_prompt(**req)
+                        batch_results.append(result)
+                    except Exception as e:
+                        logger.error(f"Failed to generate prompt in batch: {str(e)}")
+                        # Use fallback for failed requests
+                        fallback = self._fallback_prompt_generation(**req)
+                        batch_results.append(fallback)
+                
+                results.extend(batch_results)
+                
+                # Small delay between batches to respect rate limits
+                if i + batch_size < len(prompt_requests):
+                    time.sleep(1)
             
-            # Ensure the total length doesn't exceed 500 characters
-            if len(combined) > 500:
-                # Keep existing and add only the most important character terms
-                essential_terms = ["different person", "changed appearance", "inconsistent character"]
-                available_terms = [term for term in essential_terms if term not in existing_negative]
-                if available_terms:
-                    combined = existing_negative + ", " + ", ".join(available_terms[:2])
-                else:
-                    combined = existing_negative
+            total_time = time.time() - start_time
+            logger.info(f"Batch generation completed in {total_time:.2f}s")
             
-            return combined
-        else:
-            return character_negative
+            return results
+            
+        except Exception as e:
+            logger.error(f"Batch generation failed: {str(e)}")
+            # Fallback to individual generation
+            return [self._fallback_prompt_generation(**req) for req in prompt_requests]
+    
+    def is_available(self) -> bool:
+        """Check if the modern prompt generator is fully functional"""
+        return self.llm is not None and self.main_chain is not None
 
+# Global instance
+_modern_prompt_generator = None
 
-# Integration with existing langchain_prompts.py
-def generate_character_locked_cinematic_prompt(
-    action_direction: str,
-    scene_vision: str,
-    frame_description: str,
-    image_description: str,
-    theme: str,
-    background: str,
-    main_subject: str,
-    tone_and_color: str,
-    current_chain: int,
-    total_chains: int,
-    character_manager: Optional['CharacterConsistencyManager'] = None
-) -> str:
-    """
-    Enhanced version of generate_cinematic_prompt with character locking
-    """
+def get_modern_prompt_generator() -> ModernEnhancedPromptGenerator:
+    """Get global modern prompt generator instance"""
+    global _modern_prompt_generator
     
-    # Initialize the character-locked prompt generator
-    prompt_generator = CharacterLockedPromptGenerator()
+    if _modern_prompt_generator is None:
+        _modern_prompt_generator = ModernEnhancedPromptGenerator()
     
-    # If character manager is provided, use it to set character description
-    if character_manager:
-        char_desc = character_manager.generate_character_description()
-        
-        # Build body_type and hair_details from character manager data only
-        # Don't use potentially corrupted main_subject parameter
-        appearance = char_desc.get('appearance', '')
-        if appearance:
-            char_desc['body_type'] = f"consistent build and posture of {appearance}"
-        else:
-            char_desc['body_type'] = "consistent build and posture"
-            
-        # Extract hair details from distinctive_features if available
-        distinctive = char_desc.get('distinctive_features', '')
-        if distinctive and 'hair' in distinctive.lower():
-            # Extract hair-related terms
-            hair_terms = [term.strip() for term in distinctive.split(',') if 'hair' in term.lower()]
-            if hair_terms:
-                char_desc['hair_details'] = hair_terms[0]
-            else:
-                char_desc['hair_details'] = "consistent hairstyle and color"
-        else:
-            char_desc['hair_details'] = "consistent hairstyle and color"
-        
-        prompt_generator.set_character_description(char_desc)
-    else:
-        # Create character description from provided details (fallback only)
-        char_desc = {
-            'appearance': "the person in the image",
-            'facial_features': "consistent facial features",
-            'clothing': "clothing visible in the scene",
-            'distinctive_features': "distinctive features from the image",
-            'body_type': "consistent build and posture",
-            'hair_details': "hairstyle and color from the original image"
-        }
-        prompt_generator.set_character_description(char_desc)
-    
-    # Determine story phase
-    progress_percent = int((current_chain / total_chains) * 100)
-    story_phase = (
-        "Establishing" if current_chain == 0 else
-        "Setup" if current_chain < total_chains / 3 else
-        "Development" if current_chain < total_chains * 2 / 3 else
-        "Resolution"
+    return _modern_prompt_generator
+
+# Backwards compatibility functions
+def generate_enhanced_prompt(action_direction: str, theme: str = "", background: str = "", 
+                           main_subject: str = "", tone_and_color: str = "", 
+                           scene_vision: str = "", style: str = "cinematic") -> str:
+    """Backwards compatibility wrapper"""
+    generator = get_modern_prompt_generator()
+    return generator.generate_enhanced_prompt(
+        action_direction, theme, background, main_subject, 
+        tone_and_color, scene_vision, style
     )
-    
-    # Generate the character-locked prompt
-    locked_prompt = prompt_generator.generate_locked_prompt(
-        action_direction=action_direction,
-        scene_vision=scene_vision,
-        frame_description=frame_description,
-        story_phase=story_phase,
-        current_chain=current_chain,
-        total_chains=total_chains
-    )
-    
-    return locked_prompt
+
+def generate_continuation_prompt(previous_prompt: str, continuation_direction: str) -> str:
+    """Backwards compatibility wrapper"""
+    generator = get_modern_prompt_generator()
+    return generator.generate_continuation_prompt(previous_prompt, continuation_direction)
+
+# Migration helper function
+def migrate_from_old_enhanced_prompts():
+    """
+    Helper function to migrate from old LLMChain-based implementation
+    This can be called during initialization to ensure smooth transition
+    """
+    try:
+        generator = get_modern_prompt_generator()
+        if generator.is_available():
+            logger.info("✅ Modern enhanced prompts successfully migrated from deprecated LLMChain")
+            return True
+        else:
+            logger.warning("⚠️ Modern enhanced prompts initialized but LLM unavailable")
+            return False
+    except Exception as e:
+        logger.error(f"❌ Failed to migrate enhanced prompts: {str(e)}")
+        return False
+
+# Auto-migration on import
+if __name__ != "__main__":
+    migrate_from_old_enhanced_prompts()
