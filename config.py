@@ -67,3 +67,22 @@ FACE_SWAP_CONFIG = {
     "max_video_size": 100,  # Max video size in MB to process
     "quality_preset": "balanced"  # "fast", "balanced", or "quality"
 }
+
+# Quality presets
+FACE_SWAP_PRESETS = {
+    "fast": {
+        "skip_frames": 3,
+        "similarity_threshold": 0.4,
+        "batch_size": 8
+    },
+    "balanced": {
+        "skip_frames": 1,
+        "similarity_threshold": 0.5,
+        "batch_size": 4
+    },
+    "quality": {
+        "skip_frames": 1,
+        "similarity_threshold": 0.6,
+        "batch_size": 2
+    }
+}
