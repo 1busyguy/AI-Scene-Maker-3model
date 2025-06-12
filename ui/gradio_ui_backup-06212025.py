@@ -19,20 +19,6 @@ logging.basicConfig(level=logging.INFO,
                    handlers=[logging.StreamHandler()])
 logger = logging.getLogger(__name__)
 
-# Try to import enhanced quality modules
-try:
-    from utils.enhanced_fal_client import (
-        upload_file_with_maximum_quality, 
-        generate_video_with_quality_optimization,
-        integrate_quality_preservation_into_chain
-    )
-    from utils.enhanced_video_processing import ChainQualityPreserver
-    ENHANCED_QUALITY_AVAILABLE = True
-    logger.info("Enhanced quality preservation modules loaded")
-except ImportError as e:
-    ENHANCED_QUALITY_AVAILABLE = False
-    logger.warning(f"Enhanced quality modules not available: {e}")
-
 # Suppress excessive logging from HTTP libraries
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -1341,26 +1327,6 @@ def create_ui():
                             current_operation = gr.Markdown("Preparing...")
                             eta_display = gr.Markdown("Estimated time remaining: Calculating...")
                         
-                        # Quality monitoring display
-                        with gr.Group(visible=False) as quality_monitor:
-                            gr.Markdown("### 📊 Quality Monitoring")
-                            quality_score_display = gr.Number(
-                                label="Current Quality Score",
-                                value=0.0,
-                                precision=2,
-                                interactive=False
-                            )
-                            degradation_warning = gr.Markdown("", elem_id="degradation_warning")
-                            quality_recommendations = gr.Textbox(
-                                label="Quality Recommendations",
-                                lines=3,
-                                interactive=False
-                            )
-                            quality_report_download = gr.File(
-                                label="Download Quality Report",
-                                visible=False
-                            )
-                        
                         output_videos = gr.Video(label="Generated Story")
                         
                         chain_gallery = gr.Gallery(
@@ -1582,20 +1548,25 @@ def create_ui():
             else:
                 return wan_res
 
-        # Connect the generate button
+        # Start generation when button clicked
         generate_btn.click(
             fn=ui_start_chain_generation,
             inputs=[
                 action_direction, image_upload, 
                 theme, background, main_subject, tone_and_color, scene_vision,
-                model_type,
+                # We need to select the appropriate resolution based on model
+                # This will be handled inside the function
+                model_type,  # We'll check this first to determine which resolution to use
                 wan_resolution, pixverse_resolution, luma_resolution, kling_resolution,
                 inference_steps, safety_checker, 
                 prompt_expansion, auto_determine, num_chains, 
                 seed, pixverse_duration, pixverse_style, pixverse_negative_prompt,
                 luma_duration, luma_aspect_ratio,
+                # Add Kling parameters here:
                 kling_duration, kling_aspect_ratio, kling_negative_prompt, kling_creativity,
+                # Advanced features:
                 enable_character_consistency, enable_face_enhancement, enable_face_swapping,
+                # Quality settings:
                 enable_quality_preservation, quality_vs_speed,
                 generation_running, cancel_requested
             ],
@@ -1603,10 +1574,7 @@ def create_ui():
                 generation_running, chain_gallery, output_videos, 
                 video_paths, final_video_path, generation_status, 
                 output_status, download_link, progress_group,
-                overall_progress, chain_progress, current_operation, eta_display,
-                # Add quality monitoring outputs
-                quality_monitor, quality_score_display, degradation_warning,
-                quality_recommendations, quality_report_download
+                overall_progress, chain_progress, current_operation, eta_display
             ]
         )
 
@@ -1677,8 +1645,11 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
                            auto_determine, chains, seed_val, pixverse_duration="5", 
                            pixverse_style="None", pixverse_negative_prompt="", 
                            luma_duration="5", luma_aspect_ratio="16:9",
+                           # Add Kling parameters:
                            kling_duration="5", kling_aspect_ratio="16:9", kling_negative_prompt="", kling_creativity=0.5,
+                           # Character consistency and face enhancement:
                            enable_character_consistency=True, enable_face_enhancement=True, enable_face_swapping=False,
+                           # Quality settings:
                            enable_quality_preservation=True, quality_vs_speed="Maximum Quality",
                            gen_running=False, cancel_req=False):
     """Handle the UI aspects of chain generation, including updating UI elements during generation"""
@@ -1709,9 +1680,7 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
         gen_running, None, None, video_paths, final_path, 
         "Starting chain generation...", "", gr.update(visible=False),
         gr.update(visible=True), 0, 0, 
-        "Initializing...", "Estimated time remaining: Calculating...",
-        # Add quality monitoring updates
-        gr.update(visible=enable_quality_preservation), 0.0, "", "", gr.update(visible=False)
+        "Initializing...", "Estimated time remaining: Calculating..."
     )
     
     try:
@@ -1721,18 +1690,22 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
             
         # Prepare model-specific parameters
         if model_selection == "Pixverse v3.5":
+            # Pixverse-specific parameters
             model_params = {
                 "duration": int(pixverse_duration),
                 "style": None if pixverse_style == "None" else pixverse_style,
                 "negative_prompt": pixverse_negative_prompt,
-                "aspect_ratio": "16:9"
+                "aspect_ratio": "16:9"  # Default for Pixverse
             }
         elif model_selection == "LUMA Ray2":
+            # LUMA-specific parameters - keep only essential parameters
             model_params = {
-                "duration": 5,
+                "duration": 5,  # Always force 5 seconds for LUMA Ray2
                 "aspect_ratio": luma_aspect_ratio
+                # No loop parameter to avoid API issues
             }
         elif model_selection == "Kling 2.1 PRO":
+            # Kling 2.1 PRO specific parameters
             model_params = {
                 "duration": int(kling_duration),
                 "aspect_ratio": kling_aspect_ratio,
@@ -1740,12 +1713,14 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
                 "creativity": kling_creativity
             }
         else:
+            # WAN parameters (empty dict as defaults are used)
             model_params = {}
             
-        # Log the user-edited inputs
+        # Log the user-edited inputs to ensure we're using the most current values
         logger.info(f"Generation with user-edited fields: theme={theme}, background={background}, main_subject={main_subject}, tone_color={tone_color}, action_dir={action_dir}")
             
         # Run the chain generation with all structured components
+        # Using the current field values from the UI inputs rather than any stored values
         chain_generator = start_chain_generation_with_updates(
             action_direction=action_dir,
             image=img,
@@ -1771,21 +1746,27 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
         )
         
         # Process chain generation results
-        chain_videos = {}
+        chain_videos = {}  # Dictionary to store {chain_number: video_path}
         completed_chains = 0
-        determined_chains = chains if chains > 0 else 3
+        determined_chains = chains if chains > 0 else 3  # Default assumption
         
         for update_type, result, message in chain_generator:
             if update_type == "progress":
+                # Progress update - parse percentage from message if possible
                 try:
                     chain_percent = float(result) * 100 if isinstance(result, (int, float)) else 0
                 except (ValueError, TypeError):
                     chain_percent = 0
                 
-                overall_percent = (completed_chains / determined_chains) * 100
-                if chain_percent > 0:
-                    overall_percent += (chain_percent / 100) * (100 / determined_chains)
+                # Calculate overall progress
+                if chains > 0:
+                    overall_percent = (completed_chains / chains) * 100
+                    if chain_percent > 0:
+                        overall_percent += (chain_percent / 100) * (100 / chains)
+                else:
+                    overall_percent = (completed_chains / determined_chains) * 100
                     
+                # Calculate ETA
                 elapsed = time.time() - start_time
                 if overall_percent > 0:
                     total_estimated = elapsed / (overall_percent / 100)
@@ -1798,26 +1779,7 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
                     gen_running, None, None, video_paths, final_path, 
                     f"Progress: {message}", "", gr.update(visible=False),
                     gr.update(visible=True), min(99, overall_percent), chain_percent, 
-                    f"Current operation: {message}", eta_text,
-                    # Add quality monitoring updates
-                    gr.update(visible=enable_quality_preservation), 0.0, "", "", gr.update(visible=False)
-                )
-            
-            elif update_type == "quality_update":
-                # Handle quality monitoring updates
-                quality_score = result.get("quality_score", 0.0) if isinstance(result, dict) else 0.0
-                warning = result.get("warning", "") if isinstance(result, dict) else ""
-                recommendations = result.get("recommendations", "") if isinstance(result, dict) else ""
-                has_report = result.get("report_path") is not None if isinstance(result, dict) else False
-                
-                yield (
-                    gen_running, None, None, video_paths, final_path, 
-                    message, "", gr.update(visible=False),
-                    gr.update(visible=True), min(99, overall_percent), chain_percent, 
-                    f"Current operation: {message}", eta_text,
-                    # Quality monitoring updates
-                    gr.update(visible=enable_quality_preservation), quality_score, warning, recommendations, 
-                    gr.update(visible=has_report)
+                    f"Current operation: {message}", eta_text
                 )
             
             elif update_type == "chains":
@@ -1828,9 +1790,7 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
                     gen_running, None, None, video_paths, final_path, 
                     f"Number of chains determined: {result}", "", gr.update(visible=False),
                     gr.update(visible=True), min(10, (completed_chains / determined_chains) * 100), 0, 
-                    "Preparing for video generation...", "Estimated time remaining: Calculating...",
-                    # Add quality monitoring updates
-                    gr.update(visible=enable_quality_preservation), 0.0, "", "", gr.update(visible=False)
+                    "Preparing for video generation...", "Estimated time remaining: Calculating..."
                 )
             
             elif update_type == "chain_complete":
@@ -1873,9 +1833,7 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
                     gen_running, gallery_items, None, video_paths, final_path, 
                     f"Chain {chain_number}/{determined_chains} completed ({overall_percent:.1f}% done)", "", gr.update(visible=False),
                     gr.update(visible=True), overall_percent, 100, 
-                    f"Completed chain {chain_number}/{determined_chains} in {format_time(chain_elapsed)}", eta_text,
-                    # Add quality monitoring updates
-                    gr.update(visible=enable_quality_preservation), 0.0, "", "", gr.update(visible=False)
+                    f"Completed chain {chain_number}/{determined_chains} in {format_time(chain_elapsed)}", eta_text
                 )
             
             elif update_type == "final":
@@ -1887,9 +1845,7 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
                     gen_running, gallery_items, final_path, video_paths, final_path, 
                     "Story generation completed successfully!", "", gr.update(visible=True),
                     gr.update(visible=True), 100, 100, 
-                    "Generation complete!", f"Total time: {format_time(time.time() - start_time)}",
-                    # Final quality monitoring update
-                    gr.update(visible=False), 0.0, "", "", gr.update(visible=False)
+                    "Generation complete!", f"Total time: {format_time(time.time() - start_time)}"
                 )
                 
             elif update_type == "error":
@@ -1897,9 +1853,7 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
                 yield (
                     False, gallery_items if 'gallery_items' in locals() else None, None, 
                     video_paths, final_path, f"Error: {message}", "", gr.update(visible=False),
-                    gr.update(visible=False), 0, 0, "", "",
-                    # Error quality monitoring update
-                    gr.update(visible=False), 0.0, "", "", gr.update(visible=False)
+                    gr.update(visible=False), 0, 0, "", ""
                 )
                 return
                 
@@ -1910,9 +1864,7 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
                     False, gallery_items if 'gallery_items' in locals() else None, None, 
                     video_paths, final_path, "Generation cancelled by user", "", gr.update(visible=False),
                     gr.update(visible=False), 0, 0, 
-                    f"Generation cancelled after {format_time(total_time)}", "",
-                    # Final quality monitoring update
-                    gr.update(visible=False), 0.0, "", "", gr.update(visible=False)
+                    f"Generation cancelled after {format_time(total_time)}", ""
                 )
                 return
         
@@ -1924,17 +1876,13 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
                 gen_running, gallery_items, final_path, video_paths, final_path, 
                 "Story generation completed successfully!", "", gr.update(visible=True),
                 gr.update(visible=True), 100, 100, 
-                "Generation complete!", f"Total time: {format_time(total_time)}",
-                # Final quality monitoring update
-                gr.update(visible=False), 0.0, "", "", gr.update(visible=False)
+                "Generation complete!", f"Total time: {format_time(total_time)}"
             )
         else:
             yield (
                 gen_running, gallery_items if 'gallery_items' in locals() else None, None, 
                 video_paths, final_path, "Generation completed but no final video was produced", "", gr.update(visible=False),
-                gr.update(visible=False), 0, 0, "", "",
-                # Final quality monitoring update
-                gr.update(visible=False), 0.0, "", "", gr.update(visible=False)
+                gr.update(visible=False), 0, 0, "", ""
             )
             
     except Exception as e:
@@ -1942,9 +1890,7 @@ def ui_start_chain_generation(action_dir, img, theme, background, main_subject, 
         yield (
             False, None, None, video_paths, final_path, 
             f"An unexpected error occurred: {str(e)}", "", gr.update(visible=False),
-            gr.update(visible=False), 0, 0, "", "",
-            # Error quality monitoring update
-            gr.update(visible=False), 0.0, "", "", gr.update(visible=False)
+            gr.update(visible=False), 0, 0, "", ""
         )
 
 # Helper function for formatting time
