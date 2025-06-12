@@ -209,226 +209,484 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
     Generate a series of AI-generated videos with updates for the gradio UI
     Returns a generator that yields (update_type, data, message)
     """
-    # CRITICAL: Reset chain state at the beginning of each session
-    reset_chain_state()
-    yield "progress", 0.01, "Initializing chain state management..."
-    
-    session_timestamp = int(time.time())
-    session_dir = os.path.join(OUTPUT_DIR, f"story_generation_{session_timestamp}")
-    os.makedirs(session_dir, exist_ok=True)
-    
-    # Initialize chain state manager
-    chain_state = get_chain_state_manager()
-    
-    # Handle image input and set as original
-    current_image_path = None
-    if isinstance(image, str):
-        current_image_path = os.path.join(session_dir, "original_input.png")
-        import shutil
-        shutil.copy2(image, current_image_path)
-    else:
-        current_image_path = os.path.join(session_dir, "original_input.png")
-        if isinstance(image, np.ndarray):
-            Image.fromarray(image).save(current_image_path)
-        elif isinstance(image, Image.Image):
-            image.save(current_image_path)
-    
-    # CRITICAL: Set original image in chain state
-    chain_state.set_original_image(current_image_path)
-    
-    # Auto-adjust ONLY the original image (prevent re-adjustment)
-    yield "progress", 0.05, "Processing original image (one-time adjustment)..."
-    try:
-        # Force adjustment for original image, but mark to prevent re-processing
-        adjusted_path, adjustments = video_processing.auto_adjust_image(
-            current_image_path, 
-            force_adjustment=True  # Only for the original image
-        )
-        if adjustments:
-            logger.info(f"Original image adjustments: {adjustments}")
-            current_image_path = adjusted_path
-            # Update chain state with adjusted original
-            chain_state.set_original_image(current_image_path)
-    except Exception as e:
-        logger.error(f"Error adjusting original image: {str(e)}")
-    
-    # Upload original image
-    yield "progress", 0.1, "Uploading original image..."
-    try:
-        current_image_url = fal_client.upload_file(current_image_path)
-        logger.info(f"Original image uploaded: {current_image_url}")
-    except Exception as e:
-        logger.error(f"Failed to upload original image: {str(e)}")
-        yield "error", None, f"Failed to upload image: {str(e)}"
-        return
-    
-    # Initialize tracking variables
+    # All videos & images from the entire chain process
     video_paths = []
-    consistency_msg = ""
+    frame_paths = []
+    final_prompt_list = []
     
-    # Main chain generation loop
-    for chain in range(num_chains):
+    # Initialize default model params if needed
+    if model_params is None:
+        model_params = {}
+    
+    # Store the structured image analysis components
+    image_analysis = {
+        "theme": theme,
+        "background": background,
+        "main_subject": main_subject,
+        "tone_and_color": tone_and_color,
+        "action_direction": action_direction
+    }
+    
+    try:
         if cancel_requested():
+            logger.info("Generation cancelled by user before starting")
             yield "cancelled", None, "Generation cancelled by user"
             return
-        
-        chain_number = chain + 1
-        base_progress = 0.2 + (chain * 0.7 / num_chains)
-        step_size = 0.7 / num_chains
-        
-        yield "progress", base_progress, f"Starting chain {chain_number}/{num_chains}..."
-        
-        # CRITICAL: Start new chain in state manager
-        selected_model = get_selected_model(model_type)
-        chain_state.start_new_chain(chain_number, selected_model)
-        
-        # CRITICAL: Validate and correct input image for this chain
-        expected_input_image = chain_state.get_current_input_image()
-        
-        # For KLING and other models, ensure we're using the RIGHT input image
-        if chain_number == 1:
-            # First chain should always use original
-            if current_image_url != fal_client.upload_file(chain_state.original_image_path):
-                logger.warning(f"🚨 FIRST CHAIN: Correcting input to use original image")
-                current_image_url = fal_client.upload_file(chain_state.original_image_path)
-        else:
-            # Subsequent chains should use extracted frame from previous chain
-            is_valid, corrected_path, message = validate_chain_input(chain_number, expected_input_image)
             
-            if not is_valid:
-                logger.warning(f"🚨 CHAIN {chain_number}: Input validation failed - {message}")
-                # Re-upload the correct image
-                yield "progress", base_progress + step_size * 0.1, f"Correcting input for chain {chain_number}..."
+        if not os.path.exists(OUTPUT_DIR):
+            os.makedirs(OUTPUT_DIR, exist_ok=True)
+            
+        logger.info(f"Starting chain generation with: action_direction={action_direction}, resolution={resolution}")
+        
+        # Create session directory for this generation
+        session_timestamp = int(time.time())
+        session_dir = os.path.join(OUTPUT_DIR, f"story_generation_{session_timestamp}")
+        os.makedirs(session_dir, exist_ok=True)
+        
+        # Handle the image based on its type
+        if image is None:
+            logger.error("No image was provided")
+            yield "error", None, "Error: No image was uploaded. Please upload an image before generating."
+            return
+        
+        yield "progress", 0.05, "Processing input image..."
+            
+        # Save the uploaded image to the session directory
+        if isinstance(image, str):
+            # If image is already a file path, copy it to session directory
+            image_path = os.path.join(session_dir, "input_image.png")
+            import shutil
+            shutil.copy2(image, image_path)
+            logger.info(f"Copied image from {image} to {image_path}")
+        else:
+            # Handle PIL Image or numpy array
+            image_path = os.path.join(session_dir, "input_image.png")
+            logger.info(f"Saving image to {image_path}")
+            
+            # If image is a numpy array (from Gradio upload)
+            if isinstance(image, np.ndarray):
+                Image.fromarray(image).save(image_path)
+            elif isinstance(image, Image.Image):
+                image.save(image_path)
+            else:
+                # Try to save whatever it is as a file
                 try:
-                    current_image_url = fal_client.upload_file(corrected_path)
-                    logger.info(f"🔧 CHAIN {chain_number}: Corrected input uploaded: {current_image_url}")
+                    with open(image_path, "wb") as f:
+                        f.write(image)
                 except Exception as e:
-                    logger.error(f"Failed to upload corrected image: {str(e)}")
-                    yield "error", None, f"Failed to correct chain input: {str(e)}"
+                    logger.exception(f"Could not save image, type: {type(image)}")
+                    yield "error", None, f"Error: Could not process the uploaded image: {str(e)}. Please try a different image format."
                     return
         
-        # Log current chain state for debugging
-        log_chain_debug_info()
-        
-        # Generate enhanced prompt
-        yield "progress", base_progress + step_size * 0.2, f"Generating enhanced prompt for chain {chain_number}..."
-        try:
-            # Use existing prompt generation logic
-            cinematic_prompt = generate_cinematic_prompt(
-                action_direction=action_direction,
-                scene_vision=scene_vision,
-                frame_description="",  # Will be updated in the loop
-                image_description=f"A scene showing {main_subject} with {background} in the background.",
-                theme=theme,
-                background=background,
-                main_subject=main_subject,
-                tone_and_color=tone_and_color,
-                current_chain=chain,
-                total_chains=num_chains
-            )
-            logger.info(f"Chain {chain_number} prompt: {cinematic_prompt}")
-        except Exception as e:
-            logger.error(f"Prompt generation failed: {str(e)}")
-            cinematic_prompt = action_direction  # Fallback
-        
-        # Generate video
-        yield "progress", base_progress + step_size * 0.3, f"Generating video for chain {chain_number}..."
-        
-        # Prepare video generation parameters
-        video_gen_params = {
-            'prompt': cinematic_prompt,
-            'image_url': current_image_url,
-            'resolution': resolution,
-            'model': selected_model
-        }
-        # Add model-specific parameters if they exist
-        if model_params:
-            video_gen_params.update(model_params)
-        
-        if selected_model.lower() == "wan":
-            video_gen_params.update({
-                'inference_steps': inference_steps,
-                'safety_checker': safety_checker,
-                'prompt_expansion': prompt_expansion
-            })
-        
-        try:
-            video_url = fal_client.generate_video_from_image(**video_gen_params)
-            logger.info(f"Chain {chain_number} video generated: {video_url}")
-        except Exception as e:
-            logger.error(f"Video generation failed for chain {chain_number}: {str(e)}")
-            yield "error", None, f"Video generation failed: {str(e)}"
+        if not os.path.exists(image_path):
+            logger.error(f"Image path does not exist: {image_path}")
+            yield "error", None, "Error: The image file could not be found. Please try uploading again."
             return
+            
+        # Auto-adjust the image if needed (too dark, too bright, or oversaturated)
+        yield "progress", 0.07, "Analyzing image quality..."
+        adjusted_path, adjustments = video_processing.auto_adjust_image(image_path)
         
-        # Download video
-        yield "progress", base_progress + step_size * 0.6, f"Downloading video for chain {chain_number}..."
+        # If adjustments were made, use the adjusted image
+        if adjustments:
+            logger.info(f"Auto-adjusted image: {', '.join(adjustments)}")
+            image_path = adjusted_path
+            # Update action direction to indicate adjustment
+            if 'action_direction' in image_analysis and image_analysis['action_direction']:
+                image_analysis['action_direction'] = f"{image_analysis['action_direction']} (Note: Image was automatically adjusted: {', '.join(adjustments)})"
+        
+        # Get structured image analysis if any component is missing
+        yield "progress", 0.1, "Analyzing image..."
+        image_description = ""
+        
+        if not all([theme, background, main_subject, tone_and_color, action_direction]):
+            try:
+                logger.info("Some structured analysis components missing, getting complete analysis...")
+                yield "progress", 0.12, "Performing detailed image analysis..."
+                analysis = openai_client.analyze_image_structured(image_path)
+                image_analysis.update({k: v for k, v in analysis.items() if not image_analysis.get(k)})
+                
+                # Set image description for backward compatibility
+                image_description = f"A scene showing {image_analysis['main_subject']} with {image_analysis['background']} in the background."
+                
+                logger.info(f"Theme: {image_analysis['theme']}")
+                logger.info(f"Background: {image_analysis['background']}")
+                logger.info(f"Main Subject: {image_analysis['main_subject']}")
+                logger.info(f"Tone and Color: {image_analysis['tone_and_color']}")
+                logger.info(f"Action Direction: {image_analysis['action_direction']}")
+                
+                yield "analysis", image_analysis, "Generated structured image analysis"
+            except Exception as e:
+                error_msg = str(e)
+                logger.exception("Error getting structured image analysis")
+                yield "error", None, f"Error analyzing image: {error_msg}"
+                return
+        
+        # Generate scene vision if not provided
+        yield "progress", 0.15, "Generating scene vision..."
+        if not scene_vision or len(scene_vision.strip()) == 0:
+            try:
+                # Create scene vision using all structured components
+                scene_vision_prompt = f"""
+                Create a comprehensive scene vision based on the following analysis:
+                
+                Theme: {image_analysis['theme']}
+                Background: {image_analysis['background']}
+                Main Subject: {image_analysis['main_subject']}
+                Tone and Color: {image_analysis['tone_and_color']}
+                Action Direction: {image_analysis['action_direction']}
+                
+                Focus primarily on the main subject while maintaining the background elements, theme, and visual tone described.
+                """
+                
+                scene_vision = openai_client.generate_scene_vision(scene_vision_prompt, image_analysis['main_subject'])
+                logger.info(f"Scene vision: {scene_vision}")
+                yield "vision", scene_vision, "Generated scene vision"
+            except Exception as e:
+                logger.exception("Error generating scene vision")
+                yield "error", None, f"Error generating scene vision with OpenAI API: {str(e)}"
+                return
+
+        # Auto-determine the number of chains if requested (num_chains = -1)
+        if num_chains == -1:
+            yield "progress", 0.18, "Auto-determining optimal chain count..."
+            try:
+                # Use OpenAI to determine the optimal number of chains based on complexity
+                num_chains = openai_client.determine_optimal_chain_count(scene_vision, action_direction)
+                logger.info(f"Auto-determined optimal chain count: {num_chains}")
+                
+                # Safety bounds check (1-10)
+                num_chains = max(1, min(10, num_chains))
+                yield "chains", num_chains, f"Auto-determined optimal chain count: {num_chains}"
+            except Exception as e:
+                logger.exception("Error determining optimal chain count")
+                # Fallback to default
+                num_chains = 3
+                logger.info(f"Falling back to default chain count: {num_chains}")
+                yield "chains", num_chains, f"Falling back to default chain count: {num_chains}"
+        
+        # Upload initial image to FAL.ai
+        yield "progress", 0.2, "Uploading initial image..."
         try:
-            video_filename = f"chain_{chain_number:02d}_{selected_model.lower()}.mp4"
-            video_path = os.path.join(session_dir, video_filename)
-            
-            fal_client.download_video(video_url, video_path)
-            video_paths.append(video_path)
-            
-            logger.info(f"Chain {chain_number} video downloaded: {video_path}")
+            current_image_url = fal_client.upload_file(image_path)
+            logger.info(f"Uploaded initial image URL: {current_image_url}")
         except Exception as e:
-            logger.error(f"Video download failed for chain {chain_number}: {str(e)}")
-            yield "error", None, f"Video download failed: {str(e)}"
-            return
-        
-        # Extract frame for next chain (if not the last chain)
-        if chain < num_chains - 1:  # Not the last chain
-            yield "progress", base_progress + step_size * 0.8, f"Extracting frame for next chain..."
+            error_msg = str(e)
+            logger.exception("Error uploading image to FAL")
+            
+            if "API key" in error_msg or "authentication" in error_msg.lower():
+                yield "error", None, "Error: Invalid FAL API key. Please check your FAL_API_KEY in the .env file."
+                return
+            elif "quota" in error_msg.lower() or "limit" in error_msg.lower():
+                yield "error", None, "Error: You've exceeded your FAL API quota. Please check your usage and billing information."
+                return
+            else:
+                yield "error", None, f"Error uploading image to FAL.ai: {error_msg}"
+                return
+
+        # Generate each video in the chain
+        for chain in range(num_chains):
+            if cancel_requested():
+                logger.info(f"Generation cancelled by user at chain {chain+1}")
+                yield "cancelled", None, "Generation cancelled by user"
+                # Return what we have so far
+                if len(video_paths) > 0:
+                    try:
+                        final_video_path = os.path.join(session_dir, "partial_story.mp4")
+                        logger.info(f"Stitching videos to create partial video: {final_video_path}")
+                        video_processing.stitch_videos(video_paths, final_video_path)
+                        yield "final", final_video_path, f"Partial story with {len(video_paths)} chains completed before cancellation"
+                    except Exception as e:
+                        logger.exception("Error stitching partial videos after cancellation")
+                        # Return individual videos if stitching failed
+                        yield "videos", video_paths, f"Generated {len(video_paths)} chains before cancellation"
+                return
+            
+            # Use 1-based chain numbers in messages for user display
+            chain_number = chain + 1
+            
+            # *** CRITICAL FIX: Log current image URL at start of each chain ***
+            logger.info(f"🔍 CHAIN {chain_number} START: Using image URL = {current_image_url}")
+            
+            base_progress = 0.2 + (0.7 * chain / num_chains)
+            step_size = 0.7 / num_chains
+            yield "progress", base_progress, f"Starting chain {chain_number}/{num_chains}..."
             
             try:
-                # Use CONTROLLED frame extraction to prevent over-enhancement
-                best_frame_path, _ = video_processing.extract_high_quality_frame_for_chain(
-                    video_path,
-                    os.path.join(session_dir, f"chain_{chain_number:02d}_processed"),
-                    original_image_path=chain_state.original_image_path,
-                    chain_number=chain_number,
-                    avoid_over_enhancement=True  # CRITICAL: Prevent over-enhancement
-                )
+                # Get description of the previous video's last frame, if there is one
+                frame_desc = ""
+                if len(frame_paths) > 0:
+                    try:
+                        yield "progress", base_progress + step_size * 0.1, "Analyzing previous frame..."
+                        frame_desc = openai_client.image_to_text(frame_paths[-1])
+                        logger.info(f"Frame description: {frame_desc}")
+                    except Exception as e:
+                        logger.exception("Error analyzing frame, continuing without frame description")
+                        frame_desc = "The previous frame of the scene."
+                else:
+                    # For the first chain, use the compiled image description
+                    frame_desc = image_description or f"A scene showing {image_analysis['main_subject']} with {image_analysis['background']} in the background."
                 
-                logger.info(f"🎯 CHAIN {chain_number}: Frame extracted for next chain: {best_frame_path}")
+                # Determine chain-specific parameters
+                chain_specific_vision = scene_vision
                 
-                # CRITICAL: Complete chain in state manager
-                chain_state.complete_chain(chain_number, video_path, best_frame_path)
-                
-                # Upload frame for next chain (NO additional enhancement)
-                yield "progress", base_progress + step_size * 0.95, f"Uploading frame for chain {chain_number + 1}..."
+                # Generate cinematic prompt using LangChain
                 try:
-                    new_image_url = fal_client.upload_file(best_frame_path)
-                    current_image_url = new_image_url
-                    logger.info(f"🔗 CHAIN {chain_number}: Frame uploaded for next chain: {new_image_url}")
+                    yield "progress", base_progress + step_size * 0.2, "Generating cinematic prompt with LangChain..."
+                    logger.info("=== Starting LangChain reasoning process for prompt generation ===")
+                    logger.info(f"Story Phase: {chain_number}/{num_chains} ({int((chain / num_chains) * 100)}% complete)")
+                    logger.info("Analyzing scene components for continuity...")
+                    
+                    cinematic_prompt = generate_cinematic_prompt(
+                        action_direction=image_analysis['action_direction'],
+                        scene_vision=chain_specific_vision,
+                        frame_description=frame_desc,
+                        image_description=image_description,
+                        theme=image_analysis['theme'],
+                        background=image_analysis['background'],
+                        main_subject=image_analysis['main_subject'],
+                        tone_and_color=image_analysis['tone_and_color'],
+                        current_chain=chain,
+                        total_chains=num_chains
+                    )
+                    logger.info(f"Generated cinematic prompt: {cinematic_prompt}")
                 except Exception as e:
-                    logger.error(f"Frame upload failed: {str(e)}")
-                    yield "error", None, f"Frame upload failed: {str(e)}"
-                    return
+                    logger.exception("Error using LangChain for prompt generation, falling back")
+                    cinematic_prompt = f"Continue the scene with {image_analysis['main_subject']} in the {image_analysis['background']}, showing {image_analysis['action_direction']}."
+                
+                # Save the prompt for later use
+                final_prompt_list.append(cinematic_prompt)
+                
+                # Determine which model to use
+                selected_model = "wan"  # Default
+                if model_type == "Pixverse v3.5":
+                    selected_model = "pixverse"
+                    model_display_name = "Pixverse v3.5"
+                    
+                    # Check if using 1080p with 8s duration (which is not allowed)
+                    if resolution == "1080p" and model_params.get("duration", 5) > 5:
+                        logger.warning("1080p videos are limited to 5 seconds in Pixverse. Forcing duration to 5 seconds.")
+                        model_params["duration"] = 5
+                        yield "progress", base_progress + step_size * 0.28, "Note: 1080p limited to 5 seconds duration, adjusting..."
+                elif model_type == "LUMA Ray2":
+                    selected_model = "luma"
+                    model_display_name = "LUMA Ray2"
+                elif model_type == "Kling 2.1 PRO":
+                    selected_model = "kling"
+                    model_display_name = "Kling 2.1 PRO"
+                else:
+                    model_display_name = "WAN"
+                
+                # Generate the video with FAL.ai
+                yield "progress", base_progress + step_size * 0.3, f"Generating video with {model_display_name} via FAL.ai..."
+                
+                # *** CRITICAL FIX: Log which image URL is being used for this chain ***
+                logger.info(f"🎬 CHAIN {chain_number} GENERATION: Using image URL = {current_image_url}")
+                
+                # Common parameters for video generation
+                video_gen_params = {
+                    "prompt": cinematic_prompt,
+                    "image_url": current_image_url,  # *** THIS MUST BE DIFFERENT FOR EACH CHAIN ***
+                    "resolution": resolution,
+                    "seed": seed if seed != -1 else None,
+                    "model": selected_model
+                }
+                
+                # Add model-specific parameters
+                if selected_model == "pixverse":
+                    # Add Pixverse-specific parameters
+                    video_gen_params.update({
+                        "safety_checker": safety_checker,  # Used differently in Pixverse
+                        "duration": model_params.get("duration", 5),
+                        "negative_prompt": model_params.get("negative_prompt", "")
+                    })
+                    
+                    # Add style parameter if specified
+                    if model_params.get("style"):
+                        video_gen_params["style"] = model_params["style"]
+                elif selected_model == "luma":
+                    # Add LUMA-specific parameters - keep only essential parameters to minimize API issues
+                    video_gen_params.update({
+                        "duration": 5,  # Always force 5 seconds for LUMA Ray2
+                        "aspect_ratio": model_params.get("aspect_ratio", "16:9")
+                        # No loop parameter to avoid API issues
+                    })
+                    
+                    # No end image functionality - each video is generated independently
+                elif selected_model == "kling":
+                    # Add Kling 2.1 PRO specific parameters
+                    video_gen_params.update({
+                        "duration": model_params.get("duration", 5),
+                        "aspect_ratio": model_params.get("aspect_ratio", "16:9"),
+                        "negative_prompt": model_params.get("negative_prompt", ""),
+                        "creativity": model_params.get("creativity", 0.5)
+                    })
+                else:
+                    # Add WAN-specific parameters
+                    video_gen_params.update({
+                        "num_frames": 81,  # Default num frames
+                        "fps": 16,  # Default FPS
+                        "inference_steps": inference_steps,
+                        "safety_checker": safety_checker,
+                        "prompt_expansion": prompt_expansion
+                    })
+                
+                # *** CRITICAL DEBUG: Final verification before API call ***
+                logger.info(f"🔍 ABOUT TO CALL VIDEO GENERATION for chain {chain_number}")
+                logger.info(f"🔍 Video generation parameters: prompt='{cinematic_prompt[:50]}...', image_url='{current_image_url}'")
+                
+                video_url = fal_client.generate_video_from_image(**video_gen_params)
+                
+                # Download the video
+                yield "progress", base_progress + step_size * 0.7, f"Downloading video for chain {chain_number}..."
+                # Using chain_number (1-indexed) in the filename instead of chain (0-indexed)
+                video_path = os.path.join(session_dir, f"chain_{chain_number:02d}.mp4")
+                fal_client.download_video(video_url, video_path)
+                video_paths.append(video_path)
+                
+                # If not the last chain, extract best frame and update current_image_url
+                if chain < num_chains - 1:
+                    yield "progress", base_progress + step_size * 0.8, "Extracting frame for next chain..."
+                    logger.info(f"🔗 CHAIN {chain_number}: Extracting frame for next chain")
+                    
+                    try:
+                        # Extract the last frame from the video
+                        best_frame_path = video_processing.extract_simple_last_frame(
+                            video_path,
+                            os.path.join(session_dir, f"chain_{chain_number:02d}_frames")
+                        )[0]  # extract_simple_last_frame returns (frame_path, video_path)
+                        
+                        logger.info(f"🔗 CHAIN {chain_number}: Extracted frame: {best_frame_path}")
+                        frame_paths.append(best_frame_path)
+                        
+                        # Get structured analysis of the best frame for continuity
+                        try:
+                            yield "progress", base_progress + step_size * 0.9, "Analyzing frame for continuity..."
+                            logger.info("Getting structured analysis of the best frame...")
+                            
+                            frame_desc = openai_client.image_to_text(best_frame_path)
+                            logger.info(f"Got description for best frame: {frame_desc[:50]}...")
+                            
+                            # If OpenAI refuses to analyze the frame, use a generic description
+                            if "sorry" in frame_desc.lower() or "can't" in frame_desc.lower() or len(frame_desc) < 20:
+                                frame_desc = f"The best frame from chain {chain_number}, showing the progression of the {image_analysis['main_subject']} in the {image_analysis['background']} setting."
+                                logger.warning(f"OpenAI refused to analyze frame, using fallback description: {frame_desc}")
+                            
+                            # Get structured analysis for continuity
+                            frame_analysis = openai_client.analyze_image_structured(best_frame_path)
+                            
+                            # Update only certain components while maintaining others for continuity
+                            image_analysis['background'] = frame_analysis['background']
+                            image_analysis['tone_and_color'] = frame_analysis['tone_and_color']
+                            
+                            logger.info(f"Updated Background: {image_analysis['background']}")
+                            logger.info(f"Updated Tone and Color: {image_analysis['tone_and_color']}")
+                            
+                        except Exception as e:
+                            logger.exception(f"Error getting frame analysis: {str(e)}")
+                            # Keep existing image analysis if this fails
+                        
+                        # Update action direction based on narrative progression
+                        try:
+                            yield "progress", base_progress + step_size * 0.95, "Updating action direction for next chain..."
+                            logger.info("Updating action direction for narrative progression...")
+                            progression_prompt = f"""
+                            Based on the current story progression ({chain_number}/{num_chains}), 
+                            suggest the next logical action direction that follows from: 
+                            "{image_analysis['action_direction']}"
+                            
+                            Maintain the core theme: "{image_analysis['theme']}"
+                            The main subject remains: "{image_analysis['main_subject']}"
+                            
+                            Provide ONLY a concise action direction (1-2 sentences) that progresses the narrative
+                            """
+                            
+                            image_analysis['action_direction'] = openai_client.generate_scene_vision(
+                                progression_prompt, 
+                                image_analysis['main_subject']
+                            )
+                            
+                            logger.info(f"Updated Action Direction: {image_analysis['action_direction']}")
+                            
+                        except Exception as e:
+                            logger.exception(f"Error updating action direction: {str(e)}")
+                            # Keep existing action direction if this fails
+                        
+                        # *** CRITICAL FIX: Upload frame and update current_image_url ***
+                        yield "progress", base_progress + step_size * 0.98, "Uploading frame for next chain..."
+                        logger.info(f"🔗 CHAIN {chain_number}: Uploading frame for next chain: {best_frame_path}")
+                        
+                        try:
+                            # Upload the extracted frame
+                            new_image_url = fal_client.upload_file(best_frame_path)
+                            
+                            # *** CRITICAL FIX: Log the URL change ***
+                            logger.info(f"🔗 CHAIN {chain_number}: Frame uploaded successfully")
+                            logger.info(f"🔗 OLD current_image_url: {current_image_url}")
+                            logger.info(f"🔗 NEW current_image_url: {new_image_url}")
+                            
+                            # *** CRITICAL FIX: Update the variable for next iteration ***
+                            current_image_url = new_image_url
+                            
+                            # *** CRITICAL FIX: Verify the update was successful ***
+                            logger.info(f"🔗 VERIFIED current_image_url is now: {current_image_url}")
+                            
+                            # *** ADDITIONAL DEBUG: Ensure URLs are actually different ***
+                            if chain == 0:  # Only for the first chain transition
+                                logger.info(f"🔍 FIRST TRANSITION: Extracted frame should be different from original")
+                                logger.info(f"🔍 Original upload vs new upload URL comparison needed")
+                            
+                        except Exception as e:
+                            logger.exception(f"🚨 CRITICAL ERROR: Failed to upload frame for chain {chain_number}: {str(e)}")
+                            yield "error", None, f"Failed to upload frame for next chain: {str(e)}"
+                            return
+                        
+                    except Exception as e:
+                        logger.exception(f"🚨 CRITICAL ERROR: Failed to extract frame for chain {chain_number}: {str(e)}")
+                        yield "error", None, f"Failed to extract frame for next chain: {str(e)}"
+                        return
+                
+                # Yield the complete chain with the formatted chain number
+                yield "chain_complete", video_path, f"Chain {chain_number} completed"
                 
             except Exception as e:
-                logger.error(f"Frame extraction failed for chain {chain_number}: {str(e)}")
-                yield "error", None, f"Frame extraction failed: {str(e)}"
-                return
-        else:
-            # Last chain - just complete it
-            chain_state.complete_chain(chain_number, video_path, None)
-    
-    # Final video stitching
-    yield "progress", 0.95, "Stitching final video..."
-    try:
-        final_video_path = os.path.join(session_dir, f"final_story_{session_timestamp}.mp4")
-        video_processing.stitch_videos(video_paths, final_video_path)
+                logger.exception(f"Error in chain {chain_number}")
+                error_msg = str(e)
+                
+                # Provide more helpful error messages for common issues
+                if "Kling" in model_type and "400 Bad Request" in error_msg:
+                    yield "error", None, f"Kling 2.1 PRO API rejected the request. This could be due to prompt content, image restrictions, or API changes. Try a different image or model."
+                    return
+                elif "LUMA" in model_type and "400 Bad Request" in error_msg:
+                    yield "error", None, f"LUMA Ray2 API rejected the request. This could be due to prompt length, image content restrictions, or API changes. Try a different image or model."
+                    return
+                elif "quota" in error_msg.lower() or "limit" in error_msg.lower() or "credit" in error_msg.lower():
+                    yield "error", None, f"API quota exceeded. Please check your FAL.ai account limits."
+                    return
+                elif chain > 0:
+                    # Return what we have so far if at least one chain was successful
+                    yield "error", None, f"Completed {chain} chains. Error in chain {chain_number}: {error_msg}"
+                    return
+                else:
+                    yield "error", None, f"Error in first chain: {error_msg}"
+                    return
         
-        logger.info(f"Final video created: {final_video_path}")
+        # Stitch videos together
+        yield "progress", 0.95, "Stitching videos together..."
+        try:
+            final_video_path = os.path.join(session_dir, "final_story.mp4")
+            logger.info(f"Stitching videos to create final video: {final_video_path}")
+            video_processing.stitch_videos(video_paths, final_video_path)
+            logger.info(f"Completed story generation")
+            yield "final", final_video_path, "Story generation completed successfully!"
+        except Exception as e:
+            logger.exception("Error stitching videos")
+            # Return the individual videos even if stitching failed
+            yield "videos", video_paths, f"Videos generated but could not be stitched together: {str(e)}"
+    
     except Exception as e:
-        logger.error(f"Video stitching failed: {str(e)}")
-        # Use first video as fallback
-        final_video_path = video_paths[0] if video_paths else None
-    
-    # Log final chain state for debugging
-    log_chain_debug_info()
-    
-    yield "final", final_video_path, f"Story generation completed successfully!{consistency_msg}"
+        logger.exception(f"Error in chain generation: {str(e)}")
+        yield "error", None, f"An unexpected error occurred: {str(e)}"
 
 def create_ui():
     # Check FFmpeg availability and create warning message
