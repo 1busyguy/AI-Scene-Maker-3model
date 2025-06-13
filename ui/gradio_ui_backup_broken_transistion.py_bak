@@ -544,27 +544,29 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                 fal_client.download_video(video_url, video_path)
                 video_paths.append(video_path)
                 
-                # If not the last chain, extract frame and update current_image_url
+                # If not the last chain, extract best frame and update current_image_url
                 if chain < num_chains - 1:
                     yield "progress", base_progress + step_size * 0.8, "Extracting frame for next chain..."
                     logger.info(f"🔗 CHAIN {chain_number}: Extracting frame for next chain")
                     
                     try:
-                        # *** CRITICAL FIX: Use SIMPLE extraction without over-enhancement ***
-                        best_frame_path, trimmed_video_path = video_processing.extract_simple_last_frame(
+                        # Extract the TRUE last frame for seamless transitions
+                        best_frame_path, trimmed_video_path = video_processing.extract_seamless_transition_frame(
                             video_path,
                             os.path.join(session_dir, f"chain_{chain_number:02d}_frames"),
-                            chain_number=chain_number,
-                            avoid_over_enhancement=True  # CRITICAL: Avoid over-enhancement
+                            chain_number
                         )
                         
-                        # CRITICAL FIX: Use the trimmed video for seamless transitions
-                        if trimmed_video_path and os.path.exists(trimmed_video_path):
-                            # Replace the untrimmed video with the trimmed version
+                        # *** CRITICAL: Replace the original video with the trimmed version ***
+                        if trimmed_video_path != video_path and os.path.exists(trimmed_video_path):
+                            # Update the video path in our list to use the trimmed version
                             video_paths[-1] = trimmed_video_path
-                            logger.info(f"🔗 CHAIN {chain_number}: Using trimmed video for seamless transitions: {trimmed_video_path}")
+                            logger.info(f"🎬 REPLACED: Using trimmed video for seamless transitions: {trimmed_video_path}")
                         else:
-                            logger.warning(f"🔗 CHAIN {chain_number}: Trimmed video not available, using original")
+                            logger.warning(f"🎬 Using original video (trimming failed or not needed): {video_path}")
+                        
+                        logger.info(f"🔗 CHAIN {chain_number}: Extracted frame: {best_frame_path}")
+                        frame_paths.append(best_frame_path)
                         
                         # Get structured analysis of the best frame for continuity
                         try:
@@ -624,9 +626,8 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                         logger.info(f"🔗 CHAIN {chain_number}: Uploading frame for next chain: {best_frame_path}")
                         
                         try:
-                            # *** THIS IS THE CRITICAL SECTION THAT MUST WORK ***
-                            # Upload the extracted frame using standard upload (no over-enhancement)
-                            new_image_url = fal_client.upload_file(best_frame_path, high_quality=False)
+                            # Upload the extracted frame
+                            new_image_url = fal_client.upload_file(best_frame_path)
                             
                             # *** CRITICAL FIX: Log the URL change ***
                             logger.info(f"🔗 CHAIN {chain_number}: Frame uploaded successfully")
@@ -847,7 +848,7 @@ def create_ui():
                             pixverse_negative_prompt = gr.Textbox(
                                 label="Negative Prompt", 
                                 placeholder="Enter negative terms to exclude from generation",
-                                value="grainy, oversaturated, oversharpened, watermark, signature, text, frame, border, overexposed, underexposed, unnatural lighting",
+                                value="cartoon, anime, illustration, drawing, painting, 3d, cgi, render, fake, doll, plastic, mannequin, unrealistic eyes, lowres, deformed, glitch, artifact, bad anatomy, bad proportions, blurry, grainy, oversaturated, oversharpened, watermark, signature, text, frame, border, overexposed, underexposed, unnatural lighting",
                                 lines=2
                             )
                             

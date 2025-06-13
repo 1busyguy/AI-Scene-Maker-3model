@@ -163,3 +163,7 @@ cython_debug/
 /realesrgan
 /insightface_models
 /tools
+/tools
+/tools
+/tools
+tools/stitch_vids.py

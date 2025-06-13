@@ -450,7 +450,7 @@ def generate_video_from_image(prompt, image_url, resolution, num_frames=81, fps=
         if negative_prompt:
             request_params["negative_prompt"] = negative_prompt
         elif safety_checker:
-            request_params["negative_prompt"] = "blurry, low quality, low resolution, pixelated, noisy, grainy, out of focus, poorly lit, poorly exposed, poorly composed, poorly framed, poorly cropped, poorly color corrected, poorly color graded"
+            request_params["negative_prompt"] = "blurry, low quality, low resolution, pixelated, noisy, grainy, out of focus, extra arms, extra legs, extra face, duplicate, mutation, off-model, inconsistent anatomy, wrong proportions, wrong hair color, wrong eye color, oversaturated, color shift, color cast, chromatic aberration, gradient banding"
         else:
             request_params["negative_prompt"] = ""
             

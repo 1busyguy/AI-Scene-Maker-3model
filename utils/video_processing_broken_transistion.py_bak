@@ -1,4 +1,4 @@
-# utils/video_processing.py - FIXED VERSION: Proper chain image flow
+# utils/video_processing.py - Fixed version addressing over-enhancement and chain issues
 import cv2
 import os
 import logging
@@ -289,405 +289,6 @@ def get_chain_state_manager():
     """Get global chain state manager"""
     return _chain_state
 
-def extract_simple_last_frame(video_path: str, output_dir: str, 
-                             chain_number: int = 1,
-                             avoid_over_enhancement: bool = True) -> Tuple[str, str]:
-    """
-    *** CRITICAL FUNCTION: SEAMLESS FRAME EXTRACTION WITH VIDEO TRIMMING ***
-    This extracts a frame for the next chain AND trims the current video for seamless flow.
-    
-    SEAMLESS LOGIC:
-    - Extract frame N for next chain
-    - Trim current video to end at frame N-1  
-    - Result: Current video ends at N-1, next video starts at N = PERFECT FLOW
-    
-    Args:
-        video_path: Path to the video file
-        output_dir: Directory to save outputs
-        chain_number: Current chain number (for logging)
-        avoid_over_enhancement: Whether to prevent over-enhancement
-        
-    Returns:
-        tuple: (extracted_frame_path, trimmed_video_path)
-    """
-    if not os.path.exists(video_path):
-        raise FileNotFoundError(f"Video file not found: {video_path}")
-    
-    os.makedirs(output_dir, exist_ok=True)
-    
-    base_name = os.path.splitext(os.path.basename(video_path))[0]
-    last_frame_path = os.path.join(output_dir, f"{base_name}_chain{chain_number:02d}_frame.png")
-    trimmed_video_path = os.path.join(output_dir, f"{base_name}_seamless.mp4")
-    
-    logger.info(f"🎬 CHAIN {chain_number}: SEAMLESS EXTRACTION from: {video_path}")
-    logger.info(f"🎬 CHAIN {chain_number}: Output frame: {last_frame_path}")
-    logger.info(f"🎬 CHAIN {chain_number}: Trimmed video: {trimmed_video_path}")
-    
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise ValueError(f"Could not open video file: {video_path}")
-    
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    if frame_count <= 0:
-        raise ValueError(f"Video file has no frames: {video_path}")
-    
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    logger.info(f"🎬 CHAIN {chain_number}: Video stats: {frame_count} frames at {fps:.2f} fps")
-    
-    # *** CRITICAL SEAMLESS LOGIC ***
-    # Extract frame from 95% through the video for next chain
-    extraction_frame = max(0, min(frame_count - 3, int(frame_count * 0.95)))
-    
-    # CRITICAL: Trim current video to end BEFORE the extraction frame
-    # This ensures no overlapping frames between chains
-    trim_end_frame = extraction_frame - 1
-    
-    logger.info(f"🎬 CHAIN {chain_number}: SEAMLESS PLAN:")
-    logger.info(f"🎬   - Extract frame {extraction_frame} for NEXT chain")
-    logger.info(f"🎬   - Trim current video to END at frame {trim_end_frame}")
-    logger.info(f"🎬   - Result: Frame {trim_end_frame} → Frame {extraction_frame} = SEAMLESS")
-    
-    # Extract the frame for next chain
-    cap.set(cv2.CAP_PROP_POS_FRAMES, extraction_frame)
-    ret, frame = cap.read()
-    cap.release()
-    
-    if not ret:
-        raise ValueError(f"Failed to read frame {extraction_frame} from video: {video_path}")
-    
-    # *** CRITICAL: Apply minimal enhancement only if requested ***
-    enhancement_level = "none"
-    if not avoid_over_enhancement:
-        enhancement_level = "light"
-        frame = _apply_minimal_enhancement(frame)
-        logger.info(f"🎬 CHAIN {chain_number}: Applied light enhancement")
-    else:
-        logger.info(f"🎬 CHAIN {chain_number}: No enhancement applied (avoid over-enhancement)")
-    
-    # *** CRITICAL: Save frame as lossless PNG ***
-    success = cv2.imwrite(last_frame_path, frame, [cv2.IMWRITE_PNG_COMPRESSION, 0])
-    if not success:
-        raise IOError(f"Failed to save frame to: {last_frame_path}")
-    
-    # Verify frame file was created and has content
-    if not os.path.exists(last_frame_path):
-        raise IOError(f"Frame file was not created: {last_frame_path}")
-    
-    file_size = os.path.getsize(last_frame_path)
-    if file_size == 0:
-        raise IOError(f"Frame file is empty: {last_frame_path}")
-    
-    logger.info(f"🎬 CHAIN {chain_number}: ✅ FRAME EXTRACTED: {last_frame_path} ({file_size/1024:.1f} KB)")
-    
-    # *** CRITICAL: TRIM VIDEO FOR SEAMLESS TRANSITIONS ***
-    try:
-        if trim_end_frame >= 0:  # Ensure we don't trim to negative frame
-            trimmed_video_path = _trim_video_for_seamless_transition(
-                video_path, trim_end_frame, trimmed_video_path, chain_number
-            )
-            logger.info(f"🎬 CHAIN {chain_number}: ✅ VIDEO TRIMMED: {trimmed_video_path}")
-            
-            # Verify the trimmed video
-            verify_cap = cv2.VideoCapture(trimmed_video_path)
-            if verify_cap.isOpened():
-                trimmed_frame_count = int(verify_cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                verify_fps = verify_cap.get(cv2.CAP_PROP_FPS)
-                verify_cap.release()
-                
-                logger.info(f"🎬 CHAIN {chain_number}: VERIFICATION: Trimmed video has {trimmed_frame_count} frames (expected: {trim_end_frame + 1})")
-                
-                if abs(trimmed_frame_count - (trim_end_frame + 1)) <= 2:
-                    logger.info(f"🎬 CHAIN {chain_number}: ✅ PERFECT SEAMLESS TRIM")
-                else:
-                    logger.warning(f"🎬 CHAIN {chain_number}: ⚠️ Trim verification: got {trimmed_frame_count}, expected ~{trim_end_frame + 1}")
-            
-        else:
-            logger.warning(f"🎬 CHAIN {chain_number}: Cannot trim to negative frame, using original video")
-            trimmed_video_path = video_path
-            
-    except Exception as e:
-        logger.error(f"🎬 CHAIN {chain_number}: TRIMMING FAILED: {str(e)}")
-        logger.warning(f"🎬 CHAIN {chain_number}: Using original video - transitions may not be seamless")
-        trimmed_video_path = video_path
-    
-    # Record enhancement for tracking
-    enhancement_tracker = get_enhancement_tracker()
-    enhancement_tracker.record_enhancement(last_frame_path, enhancement_level, "extracted_frame")
-    
-    logger.info(f"🎬 CHAIN {chain_number}: ✅ SEAMLESS EXTRACTION COMPLETE")
-    logger.info(f"🎬 CHAIN {chain_number}: Next chain will start with frame {extraction_frame}")
-    logger.info(f"🎬 CHAIN {chain_number}: Current chain ends at frame {trim_end_frame}")
-    
-    return last_frame_path, trimmed_video_path
-
-def _apply_minimal_enhancement(img: np.ndarray) -> np.ndarray:
-    """Apply very minimal enhancement to prevent over-processing"""
-    # Very light sharpening only
-    kernel = np.array([[0, -0.2, 0], [-0.2, 1.8, -0.2], [0, -0.2, 0]])
-    enhanced = cv2.filter2D(img, -1, kernel)
-    result = cv2.addWeighted(img, 0.85, enhanced, 0.15, 0)
-    return result
-
-def _apply_light_enhancement(img: np.ndarray) -> np.ndarray:
-    """Apply very light enhancement for chain continuity"""
-    # Very subtle sharpening
-    kernel = np.array([[0, -0.3, 0], [-0.3, 2.2, -0.3], [0, -0.3, 0]])
-    sharpened = cv2.filter2D(img, -1, kernel)
-    result = cv2.addWeighted(img, 0.8, sharpened, 0.2, 0)
-    
-    # Very light saturation boost
-    hsv = cv2.cvtColor(result, cv2.COLOR_BGR2HSV).astype(np.float64)
-    hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.05, 0, 255)  # 5% saturation boost
-    result = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
-    
-    return result
-
-def _apply_moderate_enhancement(img: np.ndarray) -> np.ndarray:
-    """Apply moderate enhancement for first-time processing"""
-    # Moderate sharpening
-    kernel = np.array([[0, -0.5, 0], [-0.5, 3, -0.5], [0, -0.5, 0]])
-    sharpened = cv2.filter2D(img, -1, kernel)
-    result = cv2.addWeighted(img, 0.7, sharpened, 0.3, 0)
-    
-    # Moderate saturation boost
-    hsv = cv2.cvtColor(result, cv2.COLOR_BGR2HSV).astype(np.float64)
-    hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.1, 0, 255)  # 10% saturation boost
-    result = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
-    
-    return result
-
-def _apply_heavy_enhancement(img: np.ndarray) -> np.ndarray:
-    """Apply heavy enhancement (use sparingly)"""
-    # Strong sharpening
-    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
-    sharpened = cv2.filter2D(img, -1, kernel)
-    result = cv2.addWeighted(img, 0.6, sharpened, 0.4, 0)
-    
-    # Strong saturation boost
-    hsv = cv2.cvtColor(result, cv2.COLOR_BGR2HSV).astype(np.float64)
-    hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.15, 0, 255)  # 15% saturation boost
-    result = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
-    
-    return result
-
-def _apply_controlled_enhancement(input_path: str, output_path: str, level: str = "light") -> str:
-    """Apply controlled enhancement to prevent over-processing"""
-    try:
-        from PIL import Image, ImageEnhance
-        
-        # Load image
-        img = Image.open(input_path).convert("RGB")
-        img_array = np.array(img)
-        
-        # Convert to OpenCV for processing
-        img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-        
-        # Apply enhancement based on level
-        if level == "light":
-            # Very light enhancement for chain frames
-            img_cv = _apply_light_enhancement(img_cv)
-        elif level == "moderate":
-            # Moderate enhancement (only for first enhancement)
-            img_cv = _apply_moderate_enhancement(img_cv)
-        elif level == "heavy":
-            # Heavy enhancement (rarely used)
-            img_cv = _apply_heavy_enhancement(img_cv)
-        
-        # Convert back to PIL and save
-        final_img = Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB))
-        final_img.save(output_path, format='PNG', optimize=False, compress_level=0)
-        
-        logger.info(f"Controlled enhancement applied ({level}): {output_path}")
-        return output_path
-        
-    except Exception as e:
-        logger.error(f"Controlled enhancement failed: {str(e)}")
-        return input_path
-
-def _calculate_frame_quality_score(frame: np.ndarray) -> float:
-    """Calculate comprehensive quality score for frame selection"""
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    
-    # Sharpness (Laplacian variance)
-    sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
-    
-    # Contrast
-    contrast = np.std(gray)
-    
-    # Brightness balance
-    brightness = np.mean(gray)
-    brightness_balance = 1.0 - abs((brightness - 127.5) / 127.5)
-    
-    # Edge density
-    edges = cv2.Canny(gray, 50, 150)
-    edge_density = np.sum(edges > 0) / (edges.shape[0] * edges.shape[1])
-    
-    # Color richness
-    b, g, r = cv2.split(frame)
-    color_variance = (np.var(r) + np.var(g) + np.var(b)) / 3
-    
-    # Noise estimation (lower is better)
-    noise_std = np.std(cv2.GaussianBlur(gray, (5, 5), 0) - gray)
-    noise_score = max(0, 1.0 - (noise_std / 20.0))
-    
-    # Combined quality score
-    quality_score = (
-        (sharpness / 1000) * 0.25 +      # Sharpness
-        (contrast / 100) * 0.2 +         # Contrast  
-        brightness_balance * 0.2 +       # Brightness balance
-        (edge_density * 100) * 0.15 +    # Edge detail
-        (color_variance / 1000) * 0.1 +  # Color richness
-        noise_score * 0.1                # Low noise
-    )
-    
-    return quality_score
-
-def _trim_video_for_seamless_transition(input_video_path: str, end_frame: int, 
-                                       output_video_path: str, chain_number: int) -> str:
-    """
-    *** CRITICAL FUNCTION: TRIM VIDEO FOR SEAMLESS TRANSITIONS ***
-    
-    This trims the video to end exactly at the specified frame, ensuring that:
-    - Current video ends at frame N
-    - Next video starts at frame N+1 
-    - Result: Perfect seamless transitions with no overlapping frames
-    
-    Args:
-        input_video_path: Original video path
-        end_frame: Frame number to end at (0-indexed)
-        output_video_path: Path for trimmed video
-        chain_number: Chain number for logging
-        
-    Returns:
-        Path to trimmed video
-    """
-    logger.info(f"🎬 CHAIN {chain_number}: TRIMMING for seamless transition")
-    logger.info(f"🎬 CHAIN {chain_number}: Input: {input_video_path}")
-    logger.info(f"🎬 CHAIN {chain_number}: Trim to end at frame: {end_frame}")
-    logger.info(f"🎬 CHAIN {chain_number}: Output: {output_video_path}")
-    
-    try:
-        # Method 1: Try FFmpeg for precise frame-accurate trimming
-        if FFMPEG_AVAILABLE:
-            logger.info(f"🎬 CHAIN {chain_number}: Using FFmpeg for precise frame trimming")
-            
-            # Get video properties first
-            cap = cv2.VideoCapture(input_video_path)
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            cap.release()
-            
-            # Calculate exact time to cut at
-            # +1 because we want to include the end_frame in the output
-            cut_time_seconds = (end_frame + 1) / fps
-            
-            logger.info(f"🎬 CHAIN {chain_number}: Trimming to {cut_time_seconds:.3f} seconds (frame {end_frame + 1}/{total_frames})")
-            
-            # FFmpeg command for precise trimming
-            cmd = [
-                "ffmpeg", "-y",
-                "-i", input_video_path,
-                "-t", f"{cut_time_seconds:.6f}",  # Cut at exact time
-                "-c:v", "libx264",
-                "-preset", "fast",  # Fast preset for trimming
-                "-crf", "18",  # High quality
-                "-avoid_negative_ts", "make_zero",
-                "-copyts",  # Preserve timestamps
-                output_video_path
-            ]
-            
-            try:
-                result = subprocess.run(
-                    cmd,
-                    check=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    timeout=60  # 60 second timeout
-                )
-                
-                # Verify the trimmed video
-                if os.path.exists(output_video_path):
-                    verify_cap = cv2.VideoCapture(output_video_path)
-                    if verify_cap.isOpened():
-                        trimmed_frames = int(verify_cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                        verify_fps = verify_cap.get(cv2.CAP_PROP_FPS)
-                        verify_cap.release()
-                        
-                        logger.info(f"🎬 CHAIN {chain_number}: FFmpeg trim successful: {trimmed_frames} frames at {verify_fps:.2f} fps")
-                        
-                        # Check if frame count is approximately correct
-                        expected_frames = end_frame + 1
-                        if abs(trimmed_frames - expected_frames) <= 2:
-                            logger.info(f"🎬 CHAIN {chain_number}: ✅ PERFECT TRIM: Expected ~{expected_frames}, got {trimmed_frames}")
-                            return output_video_path
-                        else:
-                            logger.warning(f"🎬 CHAIN {chain_number}: ⚠️ Frame count mismatch: Expected ~{expected_frames}, got {trimmed_frames}")
-                            return output_video_path  # Still return it as it might be close enough
-                    else:
-                        raise Exception("Could not verify trimmed video")
-                else:
-                    raise Exception("Trimmed video file not created")
-                    
-            except subprocess.CalledProcessError as e:
-                logger.error(f"🎬 CHAIN {chain_number}: FFmpeg trimming failed: {e.stderr}")
-                raise Exception(f"FFmpeg error: {e.stderr}")
-            
-            except subprocess.TimeoutExpired:
-                logger.error(f"🎬 CHAIN {chain_number}: FFmpeg trimming timed out")
-                raise Exception("FFmpeg timeout")
-        
-        else:
-            # Method 2: OpenCV fallback (less precise but works)
-            logger.info(f"🎬 CHAIN {chain_number}: Using OpenCV for video trimming (FFmpeg not available)")
-            
-            cap = cv2.VideoCapture(input_video_path)
-            if not cap.isOpened():
-                raise Exception("Could not open input video with OpenCV")
-            
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            
-            # Create video writer
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
-            
-            if not out.isOpened():
-                cap.release()
-                raise Exception("Could not create output video with OpenCV")
-            
-            # Copy frames up to and including the end frame
-            frame_idx = 0
-            frames_written = 0
-            
-            while frame_idx <= end_frame:
-                ret, frame = cap.read()
-                if not ret:
-                    logger.warning(f"🎬 CHAIN {chain_number}: Reached end of video at frame {frame_idx} (target: {end_frame})")
-                    break
-                
-                out.write(frame)
-                frames_written += 1
-                frame_idx += 1
-            
-            cap.release()
-            out.release()
-            
-            logger.info(f"🎬 CHAIN {chain_number}: OpenCV trim complete: {frames_written} frames written")
-            
-            if frames_written > 0 and os.path.exists(output_video_path):
-                return output_video_path
-            else:
-                raise Exception(f"OpenCV trimming failed: {frames_written} frames written")
-    
-    except Exception as e:
-        logger.error(f"🎬 CHAIN {chain_number}: All trimming methods failed: {str(e)}")
-        
-        # Final fallback: Return original video
-        logger.warning(f"🎬 CHAIN {chain_number}: FALLBACK: Using original video (transitions may not be seamless)")
-        return input_video_path
-
 def extract_high_quality_frame_for_chain(video_path: str, output_dir: str, 
                                         original_image_path: Optional[str] = None,
                                         chain_number: int = 1,
@@ -712,6 +313,9 @@ def extract_high_quality_frame_for_chain(video_path: str, output_dir: str,
     
     logger.info(f"🎯 CHAIN {chain_number}: Quality frame extraction from: {video_path}")
     
+    # Update chain state
+    chain_state = get_chain_state_manager()
+    
     # Use enhanced processing if available and this is not over-enhancement
     enhancement_level = "none"
     if ENHANCED_PROCESSING_AVAILABLE and original_image_path and os.path.exists(original_image_path):
@@ -724,7 +328,7 @@ def extract_high_quality_frame_for_chain(video_path: str, output_dir: str,
             
             if should_skip:
                 logger.info(f"🎯 CHAIN {chain_number}: Skipping enhancement - {reason}")
-                return extract_simple_last_frame(video_path, output_dir, chain_number, avoid_over_enhancement=True)
+                return _extract_frame_without_enhancement(video_path, output_dir, chain_number)
             else:
                 logger.info(f"🎯 CHAIN {chain_number}: Applying controlled enhancement - {reason}")
                 enhancement_level = "light"  # Use lighter enhancement for chain frames
@@ -745,8 +349,8 @@ def extract_high_quality_frame_for_chain(video_path: str, output_dir: str,
         except Exception as e:
             logger.warning(f"🎯 CHAIN {chain_number}: Enhanced processing failed: {str(e)}, using standard")
     
-    # Fallback to simple extraction
-    return extract_simple_last_frame(video_path, output_dir, chain_number, avoid_over_enhancement)
+    # Fallback to standard processing with light enhancement
+    return _extract_high_quality_frame_standard(video_path, output_dir, chain_number, enhancement_level="light")
 
 def _extract_frame_without_enhancement(video_path: str, output_dir: str, chain_number: int) -> Tuple[str, str]:
     """Extract frame without any enhancement to prevent over-processing"""
@@ -844,6 +448,171 @@ def _extract_high_quality_frame_standard(video_path: str, output_dir: str,
     enhancement_tracker.record_enhancement(final_path, enhancement_level, "extracted_frame")
     
     return final_path, video_path
+
+def _apply_controlled_enhancement(input_path: str, output_path: str, level: str = "light") -> str:
+    """Apply controlled enhancement to prevent over-processing"""
+    try:
+        from PIL import Image, ImageEnhance
+        
+        # Load image
+        img = Image.open(input_path).convert("RGB")
+        img_array = np.array(img)
+        
+        # Convert to OpenCV for processing
+        img_cv = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
+        
+        # Apply enhancement based on level
+        if level == "light":
+            # Very light enhancement for chain frames
+            img_cv = _apply_light_enhancement(img_cv)
+        elif level == "moderate":
+            # Moderate enhancement (only for first enhancement)
+            img_cv = _apply_moderate_enhancement(img_cv)
+        elif level == "heavy":
+            # Heavy enhancement (rarely used)
+            img_cv = _apply_heavy_enhancement(img_cv)
+        
+        # Convert back to PIL and save
+        final_img = Image.fromarray(cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB))
+        final_img.save(output_path, format='PNG', optimize=False, compress_level=0)
+        
+        logger.info(f"Controlled enhancement applied ({level}): {output_path}")
+        return output_path
+        
+    except Exception as e:
+        logger.error(f"Controlled enhancement failed: {str(e)}")
+        return input_path
+
+def _apply_light_enhancement(img: np.ndarray) -> np.ndarray:
+    """Apply very light enhancement for chain continuity"""
+    # Very subtle sharpening
+    kernel = np.array([[0, -0.3, 0], [-0.3, 2.2, -0.3], [0, -0.3, 0]])
+    sharpened = cv2.filter2D(img, -1, kernel)
+    result = cv2.addWeighted(img, 0.8, sharpened, 0.2, 0)
+    
+    # Very light saturation boost
+    hsv = cv2.cvtColor(result, cv2.COLOR_BGR2HSV).astype(np.float64)
+    hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.05, 0, 255)  # 5% saturation boost
+    result = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+    
+    return result
+
+def _apply_moderate_enhancement(img: np.ndarray) -> np.ndarray:
+    """Apply moderate enhancement for first-time processing"""
+    # Moderate sharpening
+    kernel = np.array([[0, -0.5, 0], [-0.5, 3, -0.5], [0, -0.5, 0]])
+    sharpened = cv2.filter2D(img, -1, kernel)
+    result = cv2.addWeighted(img, 0.7, sharpened, 0.3, 0)
+    
+    # Moderate saturation boost
+    hsv = cv2.cvtColor(result, cv2.COLOR_BGR2HSV).astype(np.float64)
+    hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.1, 0, 255)  # 10% saturation boost
+    result = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+    
+    return result
+
+def _apply_heavy_enhancement(img: np.ndarray) -> np.ndarray:
+    """Apply heavy enhancement (use sparingly)"""
+    # Strong sharpening
+    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+    sharpened = cv2.filter2D(img, -1, kernel)
+    result = cv2.addWeighted(img, 0.6, sharpened, 0.4, 0)
+    
+    # Strong saturation boost
+    hsv = cv2.cvtColor(result, cv2.COLOR_BGR2HSV).astype(np.float64)
+    hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.15, 0, 255)  # 15% saturation boost
+    result = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+    
+    return result
+
+def _calculate_frame_quality_score(frame: np.ndarray) -> float:
+    """Calculate comprehensive quality score for frame selection"""
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    
+    # Sharpness (Laplacian variance)
+    sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
+    
+    # Contrast
+    contrast = np.std(gray)
+    
+    # Brightness balance
+    brightness = np.mean(gray)
+    brightness_balance = 1.0 - abs((brightness - 127.5) / 127.5)
+    
+    # Edge density
+    edges = cv2.Canny(gray, 50, 150)
+    edge_density = np.sum(edges > 0) / (edges.shape[0] * edges.shape[1])
+    
+    # Color richness
+    b, g, r = cv2.split(frame)
+    color_variance = (np.var(r) + np.var(g) + np.var(b)) / 3
+    
+    # Noise estimation (lower is better)
+    noise_std = np.std(cv2.GaussianBlur(gray, (5, 5), 0) - gray)
+    noise_score = max(0, 1.0 - (noise_std / 20.0))
+    
+    # Combined quality score
+    quality_score = (
+        (sharpness / 1000) * 0.25 +      # Sharpness
+        (contrast / 100) * 0.2 +         # Contrast  
+        brightness_balance * 0.2 +       # Brightness balance
+        (edge_density * 100) * 0.15 +    # Edge detail
+        (color_variance / 1000) * 0.1 +  # Color richness
+        noise_score * 0.1                # Low noise
+    )
+    
+    return quality_score
+
+def extract_simple_last_frame(video_path: str, output_dir: str, 
+                             chain_number: int = 1,
+                             avoid_over_enhancement: bool = True) -> Tuple[str, str]:
+    """
+    Simple frame extraction with over-enhancement prevention.
+    """
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"Video file not found: {video_path}")
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    base_name = os.path.splitext(os.path.basename(video_path))[0]
+    last_frame_path = os.path.join(output_dir, f"{base_name}_chain{chain_number}_simple.png")
+    
+    logger.info(f"⚡ CHAIN {chain_number}: Simple frame extraction from: {video_path}")
+    
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"Could not open video file: {video_path}")
+    
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if frame_count <= 0:
+        raise ValueError(f"Video file has no frames: {video_path}")
+    
+    # Get frame from 95% through the video (avoids potential end padding)
+    target_frame = max(0, min(frame_count - 5, int(frame_count * 0.95)))
+    
+    cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+    ret, frame = cap.read()
+    cap.release()
+    
+    if not ret:
+        raise ValueError(f"Failed to read frame from video: {video_path}")
+    
+    # Check if we should avoid enhancement
+    enhancement_level = "none"
+    if not avoid_over_enhancement:
+        enhancement_level = "light"
+        frame = _apply_light_enhancement(frame)
+    
+    # Save as lossless PNG
+    cv2.imwrite(last_frame_path, frame, [cv2.IMWRITE_PNG_COMPRESSION, 0])
+    
+    logger.info(f"⚡ CHAIN {chain_number}: Frame extracted: {last_frame_path} (frame {target_frame}/{frame_count-1})")
+    
+    # Record enhancement
+    enhancement_tracker = get_enhancement_tracker()
+    enhancement_tracker.record_enhancement(last_frame_path, enhancement_level, "extracted_frame")
+    
+    return last_frame_path, video_path
 
 def extract_seamless_transition_frame(video_path: str, output_dir: str, chain_number: int = 1) -> Tuple[str, str]:
     """
@@ -952,7 +721,7 @@ def extract_seamless_transition_frame(video_path: str, output_dir: str, chain_nu
     
     try:
         if trim_end_frame >= 0:  # Make sure we don't trim to negative frame
-            trimmed_video_path = _trim_video_for_seamless_transition(video_path, trim_end_frame, trimmed_video_path, chain_number)
+            trimmed_video_path = _trim_video_to_frame(video_path, trim_end_frame, trimmed_video_path)
             logger.info(f"🎬 SEAMLESS VIDEO CREATED: {trimmed_video_path}")
             
             # Verify the trimmed video has the correct length
@@ -977,6 +746,222 @@ def extract_seamless_transition_frame(video_path: str, output_dir: str, chain_nu
         logger.error(f"🚨 TRIMMING FAILED: {str(e)}")
         logger.warning("🚨 Using original video - transitions may not be seamless")
         return transition_frame_path, video_path
+
+
+def _calculate_transition_score(frame: np.ndarray, position: int, total_frames: int) -> float:
+    """
+    Calculate how suitable a frame is for seamless transitions.
+    
+    Higher score = better for transitions
+    """
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    
+    # 1. Motion stability (lower motion = better for transitions)
+    # We can't directly measure motion without the next frame, but we can detect motion blur
+    motion_blur = cv2.Laplacian(gray, cv2.CV_64F).var()
+    motion_stability = min(1.0, motion_blur / 1000.0)  # Normalize
+    
+    # 2. Temporal position preference (slightly favor later frames, but not the very last)
+    # Position closer to end = better, but with penalty for absolute last frames
+    temporal_position = (position + 1) / total_frames
+    if temporal_position > 0.98:  # Last 2% of frames
+        temporal_penalty = 0.7  # Reduce score for very last frames
+    elif temporal_position > 0.95:  # Last 5% of frames  
+        temporal_penalty = 0.9  # Slight penalty
+    else:
+        temporal_penalty = 1.0  # No penalty
+    
+    temporal_score = temporal_position * temporal_penalty
+    
+    # 3. Visual quality (sharpness, contrast, brightness balance)
+    sharpness = cv2.Laplacian(gray, cv2.CV_64F).var() / 1000.0
+    contrast = np.std(gray) / 100.0
+    
+    brightness = np.mean(gray)
+    brightness_balance = 1.0 - abs((brightness - 127.5) / 127.5)
+    
+    visual_quality = (sharpness * 0.4 + contrast * 0.3 + brightness_balance * 0.3)
+    
+    # 4. Frame stability (avoid frames with too much high-frequency content that might indicate motion)
+    # Calculate gradient magnitude
+    grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+    gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+    
+    # High gradient variance might indicate motion/instability
+    gradient_stability = 1.0 - min(1.0, np.std(gradient_magnitude) / 50.0)
+    
+    # 5. Color stability (avoid frames with unusual color shifts)
+    # Check if colors are reasonable and stable
+    b, g, r = cv2.split(frame)
+    color_balance = 1.0 - abs(np.mean(r) - np.mean(g)) / 255.0 - abs(np.mean(g) - np.mean(b)) / 255.0
+    color_balance = max(0.0, color_balance)
+    
+    # Combine all factors for final transition score
+    final_score = (
+        temporal_score * 0.30 +      # 30% - Position in video (favor later frames)
+        visual_quality * 0.25 +      # 25% - Overall visual quality
+        motion_stability * 0.20 +    # 20% - Motion stability
+        gradient_stability * 0.15 +  # 15% - Frame stability
+        color_balance * 0.10         # 10% - Color balance
+    )
+    
+    return final_score
+
+
+def _apply_transition_stabilization(frame: np.ndarray) -> np.ndarray:
+    """
+    Apply minimal stabilization to reduce micro-movements and ensure smooth transitions.
+    """
+    # Very light bilateral filter to reduce noise while preserving edges
+    # This helps eliminate small pixel-level variations that can cause stuttering
+    stabilized = cv2.bilateralFilter(frame, 3, 10, 10)
+    
+    # Blend 90% stabilized + 10% original to maintain natural look
+    result = cv2.addWeighted(stabilized, 0.9, frame, 0.1, 0)
+    
+    return result
+
+
+def _trim_video_to_frame(input_video_path: str, end_frame: int, output_video_path: str) -> str:
+    """
+    Trim video to end exactly at the specified frame for seamless transitions.
+    
+    This is CRITICAL for seamless transitions - the video must end exactly where
+    the next chain begins.
+    
+    Args:
+        input_video_path: Original video path
+        end_frame: Frame number to end at (0-indexed)
+        output_video_path: Path for trimmed video
+        
+    Returns:
+        Path to trimmed video
+    """
+    logger.info(f"🎬 TRIMMING: {input_video_path} to end at frame {end_frame}")
+    
+    try:
+        # Method 1: Try FFmpeg for precise frame-accurate trimming
+        if FFMPEG_AVAILABLE:
+            logger.info("🎬 Using FFmpeg for precise frame trimming")
+            
+            # Get video properties first
+            cap = cv2.VideoCapture(input_video_path)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.release()
+            
+            # Calculate exact time to cut at
+            cut_time_seconds = (end_frame + 1) / fps  # +1 because we want to include the end_frame
+            
+            logger.info(f"🎬 Trimming to {cut_time_seconds:.3f} seconds (frame {end_frame + 1}/{total_frames})")
+            
+            # FFmpeg command for precise trimming
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", input_video_path,
+                "-t", f"{cut_time_seconds:.6f}",  # Cut at exact time
+                "-c:v", "libx264",
+                "-preset", "fast",  # Fast preset for trimming
+                "-crf", "18",  # High quality
+                "-avoid_negative_ts", "make_zero",
+                "-copyts",  # Preserve timestamps
+                output_video_path
+            ]
+            
+            try:
+                result = subprocess.run(
+                    cmd,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=60  # 60 second timeout
+                )
+                
+                # Verify the trimmed video
+                if os.path.exists(output_video_path):
+                    verify_cap = cv2.VideoCapture(output_video_path)
+                    if verify_cap.isOpened():
+                        trimmed_frames = int(verify_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                        verify_fps = verify_cap.get(cv2.CAP_PROP_FPS)
+                        verify_cap.release()
+                        
+                        logger.info(f"🎬 FFmpeg trim successful: {trimmed_frames} frames at {verify_fps:.2f} fps")
+                        
+                        # Check if frame count is approximately correct (allow 1-2 frame difference due to encoding)
+                        expected_frames = end_frame + 1
+                        if abs(trimmed_frames - expected_frames) <= 2:
+                            logger.info(f"🎬 ✅ PERFECT TRIM: Expected ~{expected_frames}, got {trimmed_frames}")
+                            return output_video_path
+                        else:
+                            logger.warning(f"🎬 ⚠️ Frame count mismatch: Expected ~{expected_frames}, got {trimmed_frames}")
+                            # Still return it as it might be close enough
+                            return output_video_path
+                    else:
+                        raise Exception("Could not verify trimmed video")
+                else:
+                    raise Exception("Trimmed video file not created")
+                    
+            except subprocess.CalledProcessError as e:
+                logger.error(f"🎬 FFmpeg trimming failed: {e.stderr}")
+                raise Exception(f"FFmpeg error: {e.stderr}")
+            
+            except subprocess.TimeoutExpired:
+                logger.error("🎬 FFmpeg trimming timed out")
+                raise Exception("FFmpeg timeout")
+        
+        else:
+            # Method 2: OpenCV fallback (less precise but works)
+            logger.info("🎬 Using OpenCV for video trimming (FFmpeg not available)")
+            
+            cap = cv2.VideoCapture(input_video_path)
+            if not cap.isOpened():
+                raise Exception("Could not open input video with OpenCV")
+            
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            # Create video writer
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
+            
+            if not out.isOpened():
+                cap.release()
+                raise Exception("Could not create output video with OpenCV")
+            
+            # Copy frames up to and including the end frame
+            frame_idx = 0
+            frames_written = 0
+            
+            while frame_idx <= end_frame:
+                ret, frame = cap.read()
+                if not ret:
+                    logger.warning(f"🎬 Reached end of video at frame {frame_idx} (target: {end_frame})")
+                    break
+                
+                out.write(frame)
+                frames_written += 1
+                frame_idx += 1
+            
+            cap.release()
+            out.release()
+            
+            logger.info(f"🎬 OpenCV trim complete: {frames_written} frames written")
+            
+            if frames_written > 0 and os.path.exists(output_video_path):
+                return output_video_path
+            else:
+                raise Exception(f"OpenCV trimming failed: {frames_written} frames written")
+    
+    except Exception as e:
+        logger.error(f"🎬 All trimming methods failed: {str(e)}")
+        
+        # Final fallback: Return original video
+        logger.warning("🎬 FALLBACK: Using original video (transitions may stutter)")
+        return input_video_path
+
 
 def extract_perfect_transition_frame_with_analysis(video_path: str, output_dir: str, 
                                                   chain_number: int = 1,
@@ -1058,65 +1043,6 @@ def extract_perfect_transition_frame_with_analysis(video_path: str, output_dir: 
     
     return transition_frame_path
 
-def _calculate_transition_score(frame: np.ndarray, position: int, total_frames: int) -> float:
-    """
-    Calculate how suitable a frame is for seamless transitions.
-    
-    Higher score = better for transitions
-    """
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    
-    # 1. Motion stability (lower motion = better for transitions)
-    # We can't directly measure motion without the next frame, but we can detect motion blur
-    motion_blur = cv2.Laplacian(gray, cv2.CV_64F).var()
-    motion_stability = min(1.0, motion_blur / 1000.0)  # Normalize
-    
-    # 2. Temporal position preference (slightly favor later frames, but not the very last)
-    # Position closer to end = better, but with penalty for absolute last frames
-    temporal_position = (position + 1) / total_frames
-    if temporal_position > 0.98:  # Last 2% of frames
-        temporal_penalty = 0.7  # Reduce score for very last frames
-    elif temporal_position > 0.95:  # Last 5% of frames  
-        temporal_penalty = 0.9  # Slight penalty
-    else:
-        temporal_penalty = 1.0  # No penalty
-    
-    temporal_score = temporal_position * temporal_penalty
-    
-    # 3. Visual quality (sharpness, contrast, brightness balance)
-    sharpness = cv2.Laplacian(gray, cv2.CV_64F).var() / 1000.0
-    contrast = np.std(gray) / 100.0
-    
-    brightness = np.mean(gray)
-    brightness_balance = 1.0 - abs((brightness - 127.5) / 127.5)
-    
-    visual_quality = (sharpness * 0.4 + contrast * 0.3 + brightness_balance * 0.3)
-    
-    # 4. Frame stability (avoid frames with too much high-frequency content that might indicate motion)
-    # Calculate gradient magnitude
-    grad_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-    grad_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-    gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
-    
-    # High gradient variance might indicate motion/instability
-    gradient_stability = 1.0 - min(1.0, np.std(gradient_magnitude) / 50.0)
-    
-    # 5. Color stability (avoid frames with unusual color shifts)
-    # Check if colors are reasonable and stable
-    b, g, r = cv2.split(frame)
-    color_balance = 1.0 - abs(np.mean(r) - np.mean(g)) / 255.0 - abs(np.mean(g) - np.mean(b)) / 255.0
-    color_balance = max(0.0, color_balance)
-    
-    # Combine all factors for final transition score
-    final_score = (
-        temporal_score * 0.30 +      # 30% - Position in video (favor later frames)
-        visual_quality * 0.25 +      # 25% - Overall visual quality
-        motion_stability * 0.20 +    # 20% - Motion stability
-        gradient_stability * 0.15 +  # 15% - Frame stability
-        color_balance * 0.10         # 10% - Color balance
-    )
-    
-    return final_score
 
 def _calculate_advanced_transition_score(frame: np.ndarray, position: int, total_frames: int, 
                                        previous_frame: np.ndarray = None) -> float:
@@ -1175,18 +1101,6 @@ def _calculate_advanced_transition_score(frame: np.ndarray, position: int, total
     
     return base_score
 
-def _apply_transition_stabilization(frame: np.ndarray) -> np.ndarray:
-    """
-    Apply minimal stabilization to reduce micro-movements and ensure smooth transitions.
-    """
-    # Very light bilateral filter to reduce noise while preserving edges
-    # This helps eliminate small pixel-level variations that can cause stuttering
-    stabilized = cv2.bilateralFilter(frame, 3, 10, 10)
-    
-    # Blend 90% stabilized + 10% original to maintain natural look
-    result = cv2.addWeighted(stabilized, 0.9, frame, 0.1, 0)
-    
-    return result
 
 def _apply_advanced_transition_stabilization(frame: np.ndarray, 
                                            previous_frame: np.ndarray = None) -> np.ndarray:
@@ -1214,6 +1128,9 @@ def _apply_advanced_transition_stabilization(frame: np.ndarray,
             return stabilized
     
     return stabilized
+
+# Rest of the functions remain the same but with controlled enhancement...
+# [Previous functions like auto_adjust_image, stitch_videos, etc. continue here]
 
 def auto_adjust_image(image_path: str, output_path: Optional[str] = None, 
                       brightness_threshold_low: int = 90, brightness_threshold_high: int = 210, 
@@ -1342,7 +1259,7 @@ def ensure_video_compatibility(video_path: str, force_convert: bool = False) -> 
                 break
             
             # Apply light enhancement during conversion
-            frame = _apply_minimal_enhancement(frame)
+            frame = _apply_light_enhancement(frame)
             out.write(frame)
             frame_count += 1
         
@@ -1556,50 +1473,22 @@ def log_chain_debug_info():
         for prog in debug_info['image_progression']:
             logger.info(f"    Chain {prog['chain']}: {prog['type']} -> {os.path.basename(prog['path'])}")
 
-# Export all functions for use in gradio_ui.py
+# Export the state managers for use in gradio_ui.py
 __all__ = [
-    # ✅ Core extraction functions
     'extract_high_quality_frame_for_chain',
     'extract_simple_last_frame', 
-    'extract_last_frame',
-    'extract_best_frame',
-    
-    # ✅ Seamless transition functions  
     'extract_seamless_transition_frame',
     'extract_perfect_transition_frame_with_analysis',
-    
-    # ✅ Quality & enhancement functions
-    '_apply_light_enhancement',
-    '_apply_moderate_enhancement', 
-    '_apply_heavy_enhancement',
-    '_apply_controlled_enhancement',
-    '_calculate_frame_quality_score',
-    '_extract_frame_without_enhancement',
-    '_extract_high_quality_frame_standard',
-    
-    # ✅ Transition analysis functions
-    '_calculate_transition_score',
-    '_calculate_advanced_transition_score',
-    '_apply_transition_stabilization',
-    '_apply_advanced_transition_stabilization',
-    
-    # ✅ Video processing functions
     'auto_adjust_image',
     'stitch_videos',
     'ensure_video_compatibility',
-    
-    # ✅ Chain management functions
-    'ChainStateManager',
+    'extract_last_frame',
+    'extract_best_frame',
     'reset_chain_state',
     'validate_chain_input',
     'log_chain_debug_info',
     'get_chain_state_manager',
-    
-    # ✅ Enhancement tracking
-    'EnhancementTracker',
     'get_enhancement_tracker',
-    
-    # ✅ System capabilities
     'FFMPEG_AVAILABLE',
     'FFPROBE_AVAILABLE'
 ]

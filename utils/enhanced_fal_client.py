@@ -274,7 +274,7 @@ def _optimize_parameters_for_quality(kwargs: dict, model: str, resolution: str) 
     elif model == "pixverse":
         # Pixverse optimizations
         if "negative_prompt" not in optimized or not optimized["negative_prompt"]:
-            optimized["negative_prompt"] = "low quality, blurry, pixelated, compression artifacts, low resolution, washed out colors, flat lighting, poor details"
+            optimized["negative_prompt"] = "extra arms, extra legs, extra face, duplicate, mutation, off-model, inconsistent anatomy, wrong proportions, wrong hair color, wrong eye color, oversaturated, color shift, color cast, chromatic aberration, gradient banding"
         else:
             # Enhance existing negative prompt
             quality_negatives = "low quality, blurry, washed out colors"
