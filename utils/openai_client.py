@@ -431,3 +431,121 @@ def _create_fallback_analysis(reason: str) -> dict:
         "_fallback": True,  # Flag to indicate this is a fallback response
         "_reason": reason   # Store the reason for debugging
     }
+
+def generate_tiktok_template_content(image_path, video_prompt):
+    """
+    Generate TikTok-style content using the specific template format:
+    - Brief scene description
+    - Catchy description with emojis
+    - Hashtags
+    - Music suggestion
+    
+    Args:
+        image_path: Path to the image file
+        video_prompt: The video generation prompt
+        
+    Returns:
+        str: Formatted content following the template
+    """
+    try:
+        # Use GPT Vision to analyze the image directly
+        image_analysis = analyze_image_structured(image_path)
+        
+        # Handle content policy fallbacks
+        if image_analysis.get('_fallback', False):
+            logger.warning(f"🚨 TikTok template generation: Using fallback due to content policy")
+            # Create fallback content based on prompt only
+            scene_description = f"AI-generated scene: {video_prompt[:40]}..."
+            catchy_description = f"Amazing AI transformation bringing your vision to life! ✨🎬"
+            hashtags = "#AI #VideoGeneration #Amazing #Creative #TikTok #Viral"
+            music_suggestion = "Music: Upbeat electronic track"
+        else:
+            # Generate optimized content using vision analysis
+            content_prompt = f"""
+            Based on this image analysis:
+            - Main Subject: {image_analysis['main_subject']}
+            - Background: {image_analysis['background']}
+            - Tone & Color: {image_analysis['tone_and_color']}
+            - Theme: {image_analysis['theme']}
+            
+            And video prompt: "{video_prompt}"
+            
+            Create TikTok content with EXACTLY this format:
+            
+            SCENE: [Brief 1-line description of the main visual elements - under 60 characters]
+            CATCHY: [Engaging 1-2 sentence description with 2-3 relevant emojis that makes people want to watch - under 100 characters]
+            HASHTAGS: [6-8 trending hashtags separated by spaces, including style/theme relevant ones]
+            MUSIC: [Suggest a specific song artist and title that fits the mood, or genre if no specific song]
+            
+            Make it viral, engaging, and trending! Focus on visual appeal and current TikTok trends.
+            """
+            
+            response = client.chat.completions.create(
+                model="gpt-4.1-mini",
+                messages=[{"role": "user", "content": content_prompt}],
+                max_tokens=200,
+                temperature=0.8
+            )
+            
+            content_text = response.choices[0].message.content
+            
+            # *** CRITICAL FIX: Handle OpenAI content policy rejections ***
+            if content_text is None:
+                logger.warning("🚨 OpenAI content policy rejection: TikTok template generation blocked")
+                scene_description = "[Content policy violation - manual entry required]"
+                catchy_description = "[Please enter catchy description manually] 🎬✨"
+                hashtags = "#AI #VideoGeneration #Amazing #Creative #TikTok #Viral"
+                music_suggestion = "Music: [Please suggest music manually]"
+            else:
+                # Parse the response
+                scene_description = ""
+                catchy_description = ""
+                hashtags = ""
+                music_suggestion = ""
+                
+                for line in content_text.split('\n'):
+                    line = line.strip()
+                    if line.startswith('SCENE:'):
+                        scene_description = line.replace('SCENE:', '').strip()
+                    elif line.startswith('CATCHY:'):
+                        catchy_description = line.replace('CATCHY:', '').strip()
+                    elif line.startswith('HASHTAGS:'):
+                        hashtags = line.replace('HASHTAGS:', '').strip()
+                    elif line.startswith('MUSIC:'):
+                        music_suggestion = line.replace('MUSIC:', '').strip()
+                
+                # Fallback parsing if format isn't followed
+                if not scene_description or not catchy_description or not hashtags or not music_suggestion:
+                    lines = [line.strip() for line in content_text.split('\n') if line.strip()]
+                    
+                    # Try to extract from the raw content
+                    if not scene_description:
+                        scene_description = extract_field(content_text, "SCENE") or f"AI scene: {video_prompt[:40]}..."
+                    if not catchy_description:
+                        catchy_description = extract_field(content_text, "CATCHY") or f"Amazing AI transformation! ✨🎬"
+                    if not hashtags:
+                        hashtags = extract_field(content_text, "HASHTAGS") or "#AI #VideoGeneration #Amazing #TikTok #Viral #Creative"
+                    if not music_suggestion:
+                        music_suggestion = extract_field(content_text, "MUSIC") or "Music: Upbeat electronic track"
+        
+        # Format the final content using the template
+        template_content = f"""{scene_description}
+{catchy_description}
+{hashtags}
+{music_suggestion}"""
+        
+        logger.info(f"Generated TikTok template content: {len(template_content)} characters")
+        return template_content
+        
+    except Exception as e:
+        logger.exception(f"Error generating TikTok template content: {str(e)}")
+        # Fallback content following the template format
+        scene_description = f"AI-generated scene: {video_prompt[:40]}..."
+        catchy_description = f"Amazing AI transformation bringing your vision to life! ✨🎬"
+        hashtags = "#AI #VideoGeneration #Amazing #Creative #TikTok #Viral"
+        music_suggestion = "Music: Upbeat electronic track"
+        
+        return f"""{scene_description}
+{catchy_description}
+{hashtags}
+{music_suggestion}"""

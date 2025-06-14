@@ -1806,33 +1806,43 @@ def create_ui():
                         yield "progress", (i / len(images)) * 100, f"Generating TikTok content for video {i+1}..."
                         
                         try:
-                            # Generate TikTok content using GPT vision
-                            description, hashtags = generate_tiktok_content(image_path, prompt)
-                            
-                            # Create the complete TikTok text content
-                            tiktok_text = f"{description}\n\n{hashtags}"
+                            # Generate TikTok content using new template format
+                            tiktok_text = openai_client.generate_tiktok_template_content(image_path, prompt)
                             
                             # Save TikTok content as TXT file
                             content_path = os.path.join(video_dir, "tiktok_content.txt")
                             with open(content_path, 'w', encoding='utf-8') as f:
                                 f.write(tiktok_text)
                             
+                            # Parse content for UI display (extract first two lines for backwards compatibility)
+                            content_lines = tiktok_text.split('\n')
+                            scene_description = content_lines[0] if len(content_lines) > 0 else "AI Generated Scene"
+                            catchy_description = content_lines[1] if len(content_lines) > 1 else "Amazing transformation!"
+                            
                             # Store for display in UI
                             tiktok_content[f"video_{i+1:02d}"] = {
-                                "description": description,
-                                "hashtags": hashtags,
-                                "total_length": len(f"{description} {hashtags}"),
-                                "file_path": content_path
+                                "description": f"{scene_description} - {catchy_description}",
+                                "hashtags": content_lines[2] if len(content_lines) > 2 else "#AI #VideoGeneration",
+                                "music": content_lines[3] if len(content_lines) > 3 else "Music: TBD", 
+                                "total_length": len(tiktok_text),
+                                "file_path": content_path,
+                                "full_content": tiktok_text
                             }
                             
-                            logger.info(f"Generated TikTok content for video {i+1}: {len(f'{description} {hashtags}')} chars")
+                            logger.info(f"Generated TikTok template content for video {i+1}: {len(tiktok_text)} chars")
                             
                         except Exception as e:
                             logger.exception(f"Error generating TikTok content for video {i+1}: {str(e)}")
-                            # Fallback content
-                            description = f"Amazing AI video: {prompt[:80]}..."
+                            # Fallback content using template format
+                            scene_description = f"AI-generated scene: {prompt[:40]}..."
+                            catchy_description = f"Amazing AI transformation bringing your vision to life! ✨🎬"
                             hashtags = "#AI #VideoGeneration #Amazing #Creative #TikTok #Viral"
-                            tiktok_text = f"{description}\n\n{hashtags}"
+                            music_suggestion = "Music: Upbeat electronic track"
+                            
+                            tiktok_text = f"""{scene_description}
+{catchy_description}
+{hashtags}
+{music_suggestion}"""
                             
                             # Save fallback content
                             content_path = os.path.join(video_dir, "tiktok_content.txt")
@@ -1840,10 +1850,12 @@ def create_ui():
                                 f.write(tiktok_text)
                             
                             tiktok_content[f"video_{i+1:02d}"] = {
-                                "description": description,
+                                "description": f"{scene_description} - {catchy_description}",
                                 "hashtags": hashtags,
-                                "total_length": len(f"{description} {hashtags}"),
+                                "music": music_suggestion,
+                                "total_length": len(tiktok_text),
                                 "file_path": content_path,
+                                "full_content": tiktok_text,
                                 "error": str(e)
                             }
                     
