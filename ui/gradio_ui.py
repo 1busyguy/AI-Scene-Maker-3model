@@ -304,6 +304,13 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                 logger.info("Some structured analysis components missing, getting complete analysis...")
                 yield "progress", 0.12, "Performing detailed image analysis..."
                 analysis = openai_client.analyze_image_structured(image_path)
+                
+                # *** CRITICAL FIX: Handle OpenAI content policy violations gracefully ***
+                if analysis.get('_fallback', False):
+                    logger.warning(f"🚨 Initial image analysis fallback triggered: {analysis.get('_reason', 'Unknown reason')}")
+                    yield "error", None, f"⚠️ OpenAI content policy prevented automatic analysis. Please manually fill in all the required fields (Theme, Background, Main Subject, Tone and Color, Action Direction) before proceeding."
+                    return
+                
                 image_analysis.update({k: v for k, v in analysis.items() if not image_analysis.get(k)})
                 
                 # Set image description for backward compatibility
@@ -319,7 +326,7 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
             except Exception as e:
                 error_msg = str(e)
                 logger.exception("Error getting structured image analysis")
-                yield "error", None, f"Error analyzing image: {error_msg}"
+                yield "error", None, f"Error analyzing image: {error_msg}. Please manually fill in all the required fields before proceeding."
                 return
         
         # Generate scene vision if not provided
@@ -582,15 +589,24 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                             # Get structured analysis for continuity
                             frame_analysis = openai_client.analyze_image_structured(best_frame_path)
                             
-                            # Update only certain components while maintaining others for continuity
-                            image_analysis['background'] = frame_analysis['background']
-                            image_analysis['tone_and_color'] = frame_analysis['tone_and_color']
-                            
-                            logger.info(f"Updated Background: {image_analysis['background']}")
-                            logger.info(f"Updated Tone and Color: {image_analysis['tone_and_color']}")
+                            # *** CRITICAL FIX: Handle OpenAI content policy violations during chain analysis ***
+                            if frame_analysis.get('_fallback', False):
+                                logger.warning(f"🚨 Chain {chain_number}: Frame analysis fallback triggered: {frame_analysis.get('_reason', 'Unknown reason')}")
+                                logger.info(f"🚨 Chain {chain_number}: Falling back to original scene vision - maintaining consistency")
+                                
+                                # During chain analysis, fall back to original scene vision (no updates to image_analysis)
+                                # This maintains consistency with the original vision rather than using placeholder text
+                            else:
+                                # Only update if analysis succeeded
+                                image_analysis['background'] = frame_analysis['background']
+                                image_analysis['tone_and_color'] = frame_analysis['tone_and_color']
+                                
+                                logger.info(f"Updated Background: {image_analysis['background']}")
+                                logger.info(f"Updated Tone and Color: {image_analysis['tone_and_color']}")
                             
                         except Exception as e:
                             logger.exception(f"Error getting frame analysis: {str(e)}")
+                            logger.warning(f"🚨 Chain {chain_number}: Keeping original scene vision due to analysis error")
                             # Keep existing image analysis if this fails
                         
                         # Update action direction based on narrative progression
@@ -1138,6 +1154,260 @@ def create_ui():
                     fn=clear_report,
                     outputs=[report_display, report_status]
                 )
+            
+            # Batch Video Generation tab
+            with gr.TabItem("Batch Video Generation", id="batch"):
+                gr.Markdown("""
+                ### 🎬 Batch Video Generation
+                Upload multiple images and generate individual videos using the same prompt. Perfect for creating multiple TikTok-style videos!
+                """)
+                
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        # Input section
+                        batch_images = gr.File(
+                            file_count="multiple",
+                            file_types=["image"],
+                            label="Upload Multiple Images",
+                            interactive=True
+                        )
+                        
+                        batch_prompt = gr.Textbox(
+                            label="Video Generation Prompt",
+                            lines=4,
+                            placeholder="Enter the prompt that will be used for all uploaded images..."
+                        )
+                        
+                        # Model selection for batch generation
+                        batch_model_type = gr.Dropdown(
+                            choices=["WAN (Default)", "Pixverse v3.5", "LUMA Ray2", "Kling 2.1 PRO"],
+                            value="WAN (Default)",
+                            label="Model"
+                        )
+                        
+                        # Model-specific resolution options for batch
+                        with gr.Row():
+                            # WAN resolution options
+                            batch_wan_resolution = gr.Dropdown(
+                                choices=["360p", "540p", "720p"], 
+                                value="720p", 
+                                label="Resolution",
+                                visible=True
+                            )
+                            
+                            # Pixverse resolution options (includes 1080p)
+                            batch_pixverse_resolution = gr.Dropdown(
+                                choices=["360p", "540p", "720p", "1080p"], 
+                                value="720p", 
+                                label="Resolution",
+                                visible=False
+                            )
+                            
+                            # LUMA resolution options (540p, 720p, 1080p)
+                            batch_luma_resolution = gr.Dropdown(
+                                choices=["540p", "720p", "1080p"], 
+                                value="540p", 
+                                label="Resolution",
+                                visible=False
+                            )
+                            
+                            # Kling resolution options (720p, 1080p)
+                            batch_kling_resolution = gr.Dropdown(
+                                choices=["720p", "1080p"], 
+                                value="720p", 
+                                label="Resolution",
+                                visible=False
+                            )
+                        
+                        # Pixverse-specific options group
+                        with gr.Group(visible=False) as batch_pixverse_options:
+                            with gr.Row():
+                                batch_pixverse_duration = gr.Dropdown(
+                                    choices=["5", "8"], 
+                                    value="5", 
+                                    label="Duration (seconds)"
+                                )
+                                batch_pixverse_style = gr.Dropdown(
+                                    choices=["None", "anime", "3d_animation", "clay", "comic", "cyberpunk"], 
+                                    value="None", 
+                                    label="Style"
+                                )
+                            
+                            batch_pixverse_negative_prompt = gr.Textbox(
+                                label="Negative Prompt", 
+                                placeholder="Enter negative terms to exclude from generation",
+                                value="grainy, oversaturated, oversharpened, watermark, signature, text, frame, border, overexposed, underexposed, unnatural lighting",
+                                lines=2
+                            )
+                            
+                        # LUMA-specific options group
+                        with gr.Group(visible=False) as batch_luma_options:
+                            with gr.Row():
+                                batch_luma_duration = gr.Dropdown(
+                                    choices=["5"], 
+                                    value="5", 
+                                    label="Duration (seconds)",
+                                    info="LUMA Ray2 only supports 5 second duration"
+                                )
+                                batch_luma_aspect_ratio = gr.Dropdown(
+                                    choices=["16:9", "9:16", "4:3", "3:4", "21:9", "9:21"], 
+                                    value="16:9", 
+                                    label="Aspect Ratio"
+                                )
+                        
+                        # Kling 2.1 PRO specific options group
+                        with gr.Group(visible=False) as batch_kling_options:
+                            with gr.Row():
+                                batch_kling_duration = gr.Dropdown(
+                                    choices=["5", "10"], 
+                                    value="5", 
+                                    label="Duration (seconds)",
+                                    info="Kling 2.1 PRO supports 5 or 10 second duration"
+                                )
+                                batch_kling_aspect_ratio = gr.Dropdown(
+                                    choices=["16:9", "9:16", "1:1"], 
+                                    value="16:9", 
+                                    label="Aspect Ratio"
+                                )
+                            
+                            batch_kling_negative_prompt = gr.Textbox(
+                                label="Negative Prompt", 
+                                placeholder="Enter negative terms to exclude from generation",
+                                value="cartoon, anime, illustration, drawing, painting, 3d, cgi, render, fake, doll, plastic, mannequin, extra fingers, extra limbs, mutated hands, fused fingers, distorted face, poorly drawn hands, unrealistic eyes, lowres, deformed, glitch, artifact, bad anatomy, bad proportions, blurry, grainy, oversaturated, oversharpened, watermark, signature, text, frame, border, overexposed, underexposed, unnatural lighting",
+                                lines=2
+                            )
+                            
+                            batch_kling_creativity = gr.Slider(
+                                minimum=0.0,
+                                maximum=1.0,
+                                value=0.5,
+                                step=0.1,
+                                label="Creativity Level",
+                                info="Higher values = more creative/unexpected results"
+                            )
+                        
+                        # Batch generation settings
+                        with gr.Accordion("⚙️ Batch Settings", open=True):
+                            with gr.Row():
+                                batch_inference_steps = gr.Slider(
+                                    minimum=25, 
+                                    maximum=40,
+                                    value=40, 
+                                    step=1, 
+                                    label="Inference Steps"
+                                )
+                            
+                            with gr.Row():
+                                batch_safety_checker = gr.Checkbox(label="Safety Filter", value=False)
+                                batch_prompt_expansion = gr.Checkbox(label="Prompt Expansion", value=True)
+                            
+                            batch_seed = gr.Number(
+                                label="Seed (-1 for random per video)",
+                                value=-1
+                            )
+                        
+                        # Quality settings for batch generation
+                        with gr.Accordion("🎯 Quality Settings", open=True):
+                            with gr.Row():
+                                batch_enable_character_consistency = gr.Checkbox(
+                                    label="Enable Character Consistency", 
+                                    value=True,
+                                    info="Use AI to maintain character appearance across videos"
+                                )
+                                batch_enable_face_enhancement = gr.Checkbox(
+                                    label="Enable Face Enhancement", 
+                                    value=True,
+                                    info="Enhance and restore faces for better quality"
+                                )
+                                batch_enable_face_swapping = gr.Checkbox(
+                                    label="Enable Face Swapping", 
+                                    value=False,
+                                    info="Swap faces to ensure perfect character consistency (slower)"
+                                )
+                            
+                            with gr.Row():
+                                batch_enable_quality_preservation = gr.Checkbox(
+                                    label="🎯 Maximum Quality Preservation", 
+                                    value=True,
+                                    info="Use lossless frame extraction and advanced quality enhancement (slower but maintains detail)"
+                                )
+                                batch_quality_vs_speed = gr.Radio(
+                                    choices=["Maximum Quality", "Balanced", "Maximum Speed"],
+                                    value="Maximum Quality",
+                                    label="Quality vs Speed Trade-off",
+                                    info="Quality: Best settings, slower generation | Speed: Faster generation, some quality loss"
+                                )
+                        
+                        # TikTok content generation settings
+                        with gr.Accordion("📱 TikTok Content Generation", open=True):
+                            generate_descriptions = gr.Checkbox(
+                                label="Generate TikTok Descriptions",
+                                value=True,
+                                info="Create catchy descriptions for each video"
+                            )
+                            
+                            generate_hashtags = gr.Checkbox(
+                                label="Generate Hashtags",
+                                value=True,
+                                info="Create relevant hashtags for each video"
+                            )
+                            
+                            generate_music_suggestions = gr.Checkbox(
+                                label="Generate Music Suggestions",
+                                value=True,
+                                info="Suggest music types that match each video"
+                            )
+                        
+                        # Generation controls
+                        with gr.Row():
+                            batch_generate_btn = gr.Button("🚀 Generate Batch Videos", variant="primary", size="lg")
+                            batch_cancel_btn = gr.Button("Cancel", variant="secondary")
+                        
+                        batch_status = gr.Markdown("Upload images and click 'Generate Batch Videos' to start")
+                    
+                    with gr.Column(scale=1):
+                        # Output section
+                        
+                        # Progress indicators
+                        with gr.Group(visible=False) as batch_progress_group:
+                            gr.Markdown("### 📊 Batch Generation Progress")
+                            batch_overall_progress = gr.Slider(
+                                minimum=0,
+                                maximum=100,
+                                value=0,
+                                step=1,
+                                label="Overall Progress",
+                                interactive=False
+                            )
+                            batch_current_video = gr.Markdown("Ready to start...")
+                            batch_eta = gr.Markdown("Estimated time remaining: N/A")
+                        
+                        # Results gallery
+                        batch_results_gallery = gr.Gallery(
+                            label="Generated Videos",
+                            show_label=True,
+                            elem_id="batch_gallery",
+                            columns=2,
+                            rows=3,
+                            height=600
+                        )
+                        
+                        # TikTok content display
+                        with gr.Accordion("📱 Generated TikTok Content", open=False):
+                            tiktok_content_display = gr.JSON(
+                                label="TikTok Descriptions, Hashtags, and Music Suggestions",
+                                visible=True
+                            )
+                        
+                        # Download options
+                        with gr.Row():
+                            download_all_btn = gr.Button("📥 Download All Videos", variant="secondary")
+                            clear_batch_btn = gr.Button("🗑️ Clear Batch Results", variant="secondary")
+                        
+                        # Hidden state
+                        batch_running = gr.State(False)
+                        batch_cancel_requested = gr.State(False)
+                        batch_results = gr.State({})
 
         # Connect the image upload event
         image_upload.change(
@@ -1281,39 +1551,556 @@ def create_ui():
         # Set up clear button
         clear_btn.click(
             fn=clear_session,
-            inputs=[],
             outputs=[
-                image_upload, 
-                theme, 
-                background, 
-                main_subject, 
-                tone_and_color, 
-                action_direction, 
-                scene_vision, 
-                generation_status, 
-                output_status, 
-                image_adjustment_info, 
-                download_link, 
-                overall_progress, 
-                chain_progress, 
-                current_operation, 
-                eta_display, 
-                progress_group, 
-                output_videos, 
-                chain_gallery, 
-                generation_running, 
-                cancel_requested,
-                video_paths, 
-                final_video_path,
-                enable_character_consistency,
-                enable_face_enhancement,
-                enable_face_swapping,
-                enable_quality_preservation,
-                quality_vs_speed
+                image_upload, theme, background, main_subject, tone_and_color, action_direction, scene_vision,
+                generation_status, output_status, image_adjustment_info, download_link,
+                overall_progress, chain_progress, current_operation, eta_display, progress_group,
+                output_videos, chain_gallery,
+                generation_running, cancel_requested, video_paths, final_video_path,
+                enable_character_consistency, enable_face_enhancement, enable_face_swapping,
+                enable_quality_preservation, quality_vs_speed
             ]
         )
 
-    return iface
+        # === BATCH VIDEO GENERATION FUNCTIONS ===
+        
+        def generate_tiktok_content(image_path, video_prompt):
+            """Generate TikTok-style content using GPT vision analysis"""
+            try:
+                # Use GPT Vision to analyze the image directly
+                image_analysis = openai_client.analyze_image_structured(image_path)
+                
+                # Handle content policy fallbacks
+                if image_analysis.get('_fallback', False):
+                    logger.warning(f"🚨 TikTok content generation: Using fallback due to content policy")
+                    # Create fallback content based on prompt only
+                    description = f"Amazing AI video: {video_prompt[:60]}..."
+                    hashtags = "#AI #VideoGeneration #Amazing #Creative #TikTok #Viral"
+                else:
+                    # Generate optimized content using vision analysis
+                    content_prompt = f"""
+                    Based on this image analysis:
+                    - Main Subject: {image_analysis['main_subject']}
+                    - Background: {image_analysis['background']}
+                    - Tone & Color: {image_analysis['tone_and_color']}
+                    - Theme: {image_analysis['theme']}
+                    
+                    And video prompt: "{video_prompt}"
+                    
+                    Create TikTok content with EXACTLY this format:
+                    
+                    DESCRIPTION: [Catchy 1-2 sentence description that makes people want to watch]
+                    HASHTAGS: [6-8 trending hashtags separated by spaces]
+                    
+                    CRITICAL: Total description + hashtags must be under 200 characters including spaces.
+                    Make it viral, engaging, and trending!
+                    """
+                    
+                    response = openai_client.client.chat.completions.create(
+                        model="gpt-4.1-mini",
+                        messages=[{"role": "user", "content": content_prompt}],
+                        max_tokens=150,
+                        temperature=0.8
+                    )
+                    
+                    content_text = response.choices[0].message.content
+                    
+                    # Parse the response
+                    description = ""
+                    hashtags = ""
+                    
+                    for line in content_text.split('\n'):
+                        if line.startswith('DESCRIPTION:'):
+                            description = line.replace('DESCRIPTION:', '').strip()
+                        elif line.startswith('HASHTAGS:'):
+                            hashtags = line.replace('HASHTAGS:', '').strip()
+                    
+                    # Fallback parsing if format isn't followed
+                    if not description or not hashtags:
+                        lines = [line.strip() for line in content_text.split('\n') if line.strip()]
+                        if len(lines) >= 2:
+                            description = lines[0]
+                            hashtags = lines[1] if lines[1].startswith('#') else f"#{lines[1]}"
+                        else:
+                            description = f"Amazing AI transformation: {video_prompt[:50]}..."
+                            hashtags = "#AI #VideoGeneration #Amazing #TikTok #Viral #Creative"
+                
+                # Ensure total length is under 200 characters
+                total_content = f"{description} {hashtags}"
+                if len(total_content) > 200:
+                    # Trim description first, keep hashtags
+                    available_chars = 200 - len(hashtags) - 1  # -1 for space
+                    if available_chars > 20:  # Minimum description length
+                        description = description[:available_chars-3] + "..."
+                    else:
+                        # If hashtags are too long, trim them too
+                        hashtags_list = hashtags.split()[:6]  # Keep only first 6 hashtags
+                        hashtags = " ".join(hashtags_list)
+                        available_chars = 200 - len(hashtags) - 1
+                        description = description[:available_chars-3] + "..."
+                
+                return description, hashtags
+                
+            except Exception as e:
+                logger.exception(f"Error generating TikTok content: {str(e)}")
+                # Fallback content
+                description = f"Amazing AI video: {video_prompt[:50]}..."
+                hashtags = "#AI #VideoGeneration #Amazing #Creative #TikTok #Viral"
+                return description, hashtags
+        
+        def batch_video_generation(images, prompt, model_type, 
+                                 wan_res, pixverse_res, luma_res, kling_res,
+                                 inference_steps, safety_checker, prompt_expansion, seed,
+                                 pixverse_duration, pixverse_style, pixverse_negative_prompt,
+                                 luma_duration, luma_aspect_ratio,
+                                 kling_duration, kling_aspect_ratio, kling_negative_prompt, kling_creativity,
+                                 enable_character_consistency, enable_face_enhancement, enable_face_swapping,
+                                 enable_quality_preservation, quality_vs_speed,
+                                 gen_descriptions, gen_hashtags, gen_music,
+                                 cancel_requested_fn=lambda: False):
+            """Generate multiple videos from multiple images"""
+            
+            if not images or not prompt.strip():
+                yield "error", None, "Please upload images and enter a prompt"
+                return
+            
+            logger.info(f"Starting batch generation for {len(images)} images")
+            
+            # Create batch session directory
+            batch_timestamp = int(time.time())
+            batch_dir = os.path.join(OUTPUT_DIR, f"batch_generation_{batch_timestamp}")
+            os.makedirs(batch_dir, exist_ok=True)
+            
+            results = {}
+            tiktok_content = {}
+            
+            for i, image_file in enumerate(images):
+                if cancel_requested_fn():
+                    yield "cancelled", results, "Batch generation cancelled"
+                    return
+                
+                try:
+                    # Create individual video directory
+                    video_dir = os.path.join(batch_dir, f"video_{i+1:02d}")
+                    os.makedirs(video_dir, exist_ok=True)
+                    
+                    # Handle different image_file types (path string or file object)
+                    try:
+                        # Get image name for display
+                        if hasattr(image_file, 'name'):
+                            image_name = image_file.name
+                            image_extension = image_file.name.split('.')[-1] if '.' in image_file.name else 'jpg'
+                        else:
+                            image_name = f"image_{i+1}"
+                            image_extension = 'jpg'
+                            
+                        yield "progress", (i / len(images)) * 100, f"Processing image {i+1}/{len(images)}: {image_name}"
+                        
+                        # Save uploaded image
+                        image_path = os.path.join(video_dir, f"input_image.{image_extension}")
+                        
+                        # Handle file object vs path string
+                        if isinstance(image_file, str):
+                            # If it's a file path, copy the file
+                            import shutil
+                            shutil.copy2(image_file, image_path)
+                        elif hasattr(image_file, 'read'):
+                            # If it's a file object with read method
+                            with open(image_path, "wb") as f:
+                                f.write(image_file.read())
+                        else:
+                            # Try to handle as bytes or other format
+                            with open(image_path, "wb") as f:
+                                if isinstance(image_file, bytes):
+                                    f.write(image_file)
+                                else:
+                                    # Last resort: try to convert to bytes
+                                    f.write(str(image_file).encode())
+                    except Exception as e:
+                        logger.error(f"Error processing image {i+1}: {str(e)}")
+                        # Fallback: create a placeholder path
+                        image_path = os.path.join(video_dir, f"input_image.jpg")
+                        raise ValueError(f"Could not process image {i+1}: {str(e)}")
+                    
+                    # Auto-adjust image if needed
+                    adjusted_path, adjustments = video_processing.auto_adjust_image(image_path)
+                    if adjustments:
+                        image_path = adjusted_path
+                        logger.info(f"Auto-adjusted image {i+1}: {', '.join(adjustments)}")
+                    
+                    # Upload to FAL.ai
+                    yield "progress", (i / len(images)) * 100, f"Uploading image {i+1} to FAL.ai..."
+                    image_url = fal_client.upload_file(image_path)
+                    
+                    # Generate video
+                    yield "progress", (i / len(images)) * 100, f"Generating video {i+1} with {model_type}..."
+                    
+                    # Determine model and parameters
+                    selected_model = "wan"
+                    resolution = wan_res  # Default
+                    
+                    if model_type == "Pixverse v3.5":
+                        selected_model = "pixverse"
+                        resolution = pixverse_res
+                    elif model_type == "LUMA Ray2":
+                        selected_model = "luma"
+                        resolution = luma_res
+                    elif model_type == "Kling 2.1 PRO":
+                        selected_model = "kling"
+                        resolution = kling_res
+                    
+                    # Set up video generation parameters
+                    video_params = {
+                        "prompt": prompt,
+                        "image_url": image_url,
+                        "resolution": resolution,
+                        "seed": seed if seed != -1 else None,
+                        "model": selected_model
+                    }
+                    
+                    # Add model-specific parameters
+                    if selected_model == "pixverse":
+                        video_params.update({
+                            "safety_checker": safety_checker,
+                            "duration": int(pixverse_duration),
+                            "style": None if pixverse_style == "None" else pixverse_style,
+                            "negative_prompt": pixverse_negative_prompt
+                        })
+                        
+                        # Check 1080p duration limit for Pixverse
+                        if resolution == "1080p" and int(pixverse_duration) > 5:
+                            logger.warning(f"1080p videos limited to 5 seconds in Pixverse for video {i+1}")
+                            video_params["duration"] = 5
+                            
+                    elif selected_model == "luma":
+                        video_params.update({
+                            "duration": int(luma_duration),
+                            "aspect_ratio": luma_aspect_ratio
+                        })
+                    elif selected_model == "kling":
+                        video_params.update({
+                            "duration": int(kling_duration),
+                            "aspect_ratio": kling_aspect_ratio,
+                            "negative_prompt": kling_negative_prompt,
+                            "creativity": kling_creativity
+                        })
+                    else:  # WAN
+                        video_params.update({
+                            "num_frames": 81,
+                            "fps": 16,
+                            "inference_steps": inference_steps,
+                            "safety_checker": safety_checker,
+                            "prompt_expansion": prompt_expansion
+                        })
+                    
+                    # Generate video
+                    video_url = fal_client.generate_video_from_image(**video_params)
+                    
+                    # Download video
+                    yield "progress", (i / len(images)) * 100, f"Downloading video {i+1}..."
+                    video_path = os.path.join(video_dir, f"video_{i+1:02d}.mp4")
+                    fal_client.download_video(video_url, video_path)
+                    
+                    # Generate TikTok content if requested
+                    if gen_descriptions or gen_hashtags or gen_music:
+                        yield "progress", (i / len(images)) * 100, f"Generating TikTok content for video {i+1}..."
+                        
+                        try:
+                            # Generate TikTok content using GPT vision
+                            description, hashtags = generate_tiktok_content(image_path, prompt)
+                            
+                            # Create the complete TikTok text content
+                            tiktok_text = f"{description}\n\n{hashtags}"
+                            
+                            # Save TikTok content as TXT file
+                            content_path = os.path.join(video_dir, "tiktok_content.txt")
+                            with open(content_path, 'w', encoding='utf-8') as f:
+                                f.write(tiktok_text)
+                            
+                            # Store for display in UI
+                            tiktok_content[f"video_{i+1:02d}"] = {
+                                "description": description,
+                                "hashtags": hashtags,
+                                "total_length": len(f"{description} {hashtags}"),
+                                "file_path": content_path
+                            }
+                            
+                            logger.info(f"Generated TikTok content for video {i+1}: {len(f'{description} {hashtags}')} chars")
+                            
+                        except Exception as e:
+                            logger.exception(f"Error generating TikTok content for video {i+1}: {str(e)}")
+                            # Fallback content
+                            description = f"Amazing AI video: {prompt[:80]}..."
+                            hashtags = "#AI #VideoGeneration #Amazing #Creative #TikTok #Viral"
+                            tiktok_text = f"{description}\n\n{hashtags}"
+                            
+                            # Save fallback content
+                            content_path = os.path.join(video_dir, "tiktok_content.txt")
+                            with open(content_path, 'w', encoding='utf-8') as f:
+                                f.write(tiktok_text)
+                            
+                            tiktok_content[f"video_{i+1:02d}"] = {
+                                "description": description,
+                                "hashtags": hashtags,
+                                "total_length": len(f"{description} {hashtags}"),
+                                "file_path": content_path,
+                                "error": str(e)
+                            }
+                    
+                    # Store result
+                    results[f"video_{i+1:02d}"] = {
+                        "video_path": video_path,
+                        "directory": video_dir,
+                        "image_path": image_path,
+                        "original_name": image_file.name
+                    }
+                    
+                    logger.info(f"Completed video {i+1}/{len(images)}: {video_path}")
+                    
+                except Exception as e:
+                    logger.exception(f"Error generating video {i+1}: {str(e)}")
+                    yield "error", None, f"Error generating video {i+1}: {str(e)}"
+                    return
+            
+            # Final results
+            yield "complete", results, f"Successfully generated {len(results)} videos!"
+            
+            # Return TikTok content if generated
+            if tiktok_content:
+                yield "tiktok_content", tiktok_content, "TikTok content generated!"
+        
+        def ui_batch_generation(images, prompt, model_type, 
+                               wan_res, pixverse_res, luma_res, kling_res,
+                               inference_steps, safety_checker, prompt_expansion, seed,
+                               pixverse_duration, pixverse_style, pixverse_negative_prompt,
+                               luma_duration, luma_aspect_ratio,
+                               kling_duration, kling_aspect_ratio, kling_negative_prompt, kling_creativity,
+                               enable_character_consistency, enable_face_enhancement, enable_face_swapping,
+                               enable_quality_preservation, quality_vs_speed,
+                               gen_descriptions, gen_hashtags, gen_music,
+                               running, cancel_req):
+            """UI wrapper for batch video generation"""
+            if running:
+                return (
+                    running, None, None, {},
+                    "Generation already in progress...",
+                    gr.update(visible=True), 0, "Generation in progress...", "Calculating...",
+                    {}
+                )
+            
+            if not images or not prompt.strip():
+                return (
+                    False, None, None, {},
+                    "❌ Please upload images and enter a prompt",
+                    gr.update(visible=False), 0, "Ready to start...", "N/A",
+                    {}
+                )
+            
+            # Start generation
+            start_time = time.time()
+            running = True
+            gallery_items = []
+            results = {}
+            tiktok_content = {}
+            
+            try:
+                for update_type, data, message in batch_video_generation(
+                    images, prompt, model_type,
+                    wan_res, pixverse_res, luma_res, kling_res,
+                    inference_steps, safety_checker, prompt_expansion, seed,
+                    pixverse_duration, pixverse_style, pixverse_negative_prompt,
+                    luma_duration, luma_aspect_ratio,
+                    kling_duration, kling_aspect_ratio, kling_negative_prompt, kling_creativity,
+                    enable_character_consistency, enable_face_enhancement, enable_face_swapping,
+                    enable_quality_preservation, quality_vs_speed,
+                    gen_descriptions, gen_hashtags, gen_music,
+                    lambda: cancel_req
+                ):
+                    
+                    if update_type == "progress":
+                        progress = data
+                        elapsed = time.time() - start_time
+                        if progress > 0:
+                            total_estimated = elapsed / (progress / 100)
+                            remaining = total_estimated - elapsed
+                            eta_text = f"Estimated time remaining: {format_time(remaining)}"
+                        else:
+                            eta_text = "Estimating time remaining..."
+                        
+                        yield (
+                            running, gallery_items, None, results,
+                            f"Progress: {message}",
+                            gr.update(visible=True), progress, message, eta_text,
+                            tiktok_content
+                        )
+                    
+                    elif update_type == "complete":
+                        results = data
+                        # Create gallery items
+                        gallery_items = []
+                        for video_id, video_data in results.items():
+                            if os.path.exists(video_data["video_path"]):
+                                gallery_items.append((video_data["video_path"], f"{video_id} - {video_data['original_name']}"))
+                        
+                        total_time = time.time() - start_time
+                        yield (
+                            False, gallery_items, None, results,
+                            f"✅ {message} Completed in {format_time(total_time)}",
+                            gr.update(visible=False), 100, "Complete!", f"Total time: {format_time(total_time)}",
+                            tiktok_content
+                        )
+                        
+                    elif update_type == "tiktok_content":
+                        tiktok_content = data
+                        yield (
+                            running, gallery_items, None, results,
+                            message,
+                            gr.update(visible=True), 100, "Generating TikTok content...", "Almost done...",
+                            tiktok_content
+                        )
+                        
+                    elif update_type == "error":
+                        yield (
+                            False, gallery_items, None, results,
+                            f"❌ {message}",
+                            gr.update(visible=False), 0, "Error occurred", "N/A",
+                            tiktok_content
+                        )
+                        return
+                        
+                    elif update_type == "cancelled":
+                        yield (
+                            False, gallery_items, None, results,
+                            f"⏹️ {message}",
+                            gr.update(visible=False), 0, "Cancelled", "N/A",
+                            tiktok_content
+                        )
+                        return
+                
+            except Exception as e:
+                logger.exception(f"Error in batch generation: {str(e)}")
+                yield (
+                    False, gallery_items, None, results,
+                    f"❌ Unexpected error: {str(e)}",
+                    gr.update(visible=False), 0, "Error", "N/A",
+                    tiktok_content
+                )
+        
+        def clear_batch_results():
+            """Clear batch generation results"""
+            return (
+                [], {},
+                "Batch results cleared. Upload new images to start again.",
+                gr.update(visible=False), 0, "Ready to start...", "N/A"
+            )
+        
+        # Connect batch generation events
+        batch_generate_btn.click(
+            fn=ui_batch_generation,
+            inputs=[
+                batch_images, batch_prompt, batch_model_type,
+                batch_wan_resolution, batch_pixverse_resolution, batch_luma_resolution, batch_kling_resolution,
+                batch_inference_steps, batch_safety_checker, batch_prompt_expansion, batch_seed,
+                batch_pixverse_duration, batch_pixverse_style, batch_pixverse_negative_prompt,
+                batch_luma_duration, batch_luma_aspect_ratio,
+                batch_kling_duration, batch_kling_aspect_ratio, batch_kling_negative_prompt, batch_kling_creativity,
+                batch_enable_character_consistency, batch_enable_face_enhancement, batch_enable_face_swapping,
+                batch_enable_quality_preservation, batch_quality_vs_speed,
+                generate_descriptions, generate_hashtags, generate_music_suggestions,
+                batch_running, batch_cancel_requested
+            ],
+            outputs=[
+                batch_running, batch_results_gallery, download_all_btn, batch_results,
+                batch_status, batch_progress_group, batch_overall_progress,
+                batch_current_video, batch_eta, tiktok_content_display
+            ],
+            show_progress=False
+        )
+        
+        # Connect clear batch results
+        clear_batch_btn.click(
+            fn=clear_batch_results,
+            outputs=[
+                batch_results_gallery, batch_results, batch_status,
+                batch_progress_group, batch_overall_progress, batch_current_video, batch_eta
+            ]
+        )
+        
+        # Connect cancel batch generation
+        def cancel_batch():
+            return True, "Cancellation requested..."
+        
+        batch_cancel_btn.click(
+            fn=cancel_batch,
+            outputs=[batch_cancel_requested, batch_status]
+        )
+        
+        # Toggle batch model-specific options based on model selection
+        def update_batch_model_options(model_choice):
+            if model_choice == "Pixverse v3.5":
+                return (
+                    gr.update(visible=False),  # batch_wan_resolution
+                    gr.update(visible=True),   # batch_pixverse_resolution
+                    gr.update(visible=False),  # batch_luma_resolution
+                    gr.update(visible=False),  # batch_kling_resolution
+                    gr.update(visible=True),   # batch_pixverse_options
+                    gr.update(visible=False),  # batch_luma_options
+                    gr.update(visible=False),  # batch_kling_options
+                    gr.update(visible=False),  # batch_inference_steps (WAN only)
+                    gr.update(visible=False),  # batch_safety_checker (WAN only)
+                    gr.update(visible=False)   # batch_prompt_expansion (WAN only)
+                )
+            elif model_choice == "LUMA Ray2":
+                return (
+                    gr.update(visible=False),  # batch_wan_resolution
+                    gr.update(visible=False),  # batch_pixverse_resolution
+                    gr.update(visible=True),   # batch_luma_resolution
+                    gr.update(visible=False),  # batch_kling_resolution
+                    gr.update(visible=False),  # batch_pixverse_options
+                    gr.update(visible=True),   # batch_luma_options
+                    gr.update(visible=False),  # batch_kling_options
+                    gr.update(visible=False),  # batch_inference_steps (WAN only)
+                    gr.update(visible=False),  # batch_safety_checker (WAN only)
+                    gr.update(visible=False)   # batch_prompt_expansion (WAN only)
+                )
+            elif model_choice == "Kling 2.1 PRO":
+                return (
+                    gr.update(visible=False),  # batch_wan_resolution
+                    gr.update(visible=False),  # batch_pixverse_resolution
+                    gr.update(visible=False),  # batch_luma_resolution
+                    gr.update(visible=True),   # batch_kling_resolution
+                    gr.update(visible=False),  # batch_pixverse_options
+                    gr.update(visible=False),  # batch_luma_options
+                    gr.update(visible=True),   # batch_kling_options
+                    gr.update(visible=False),  # batch_inference_steps (WAN only)
+                    gr.update(visible=False),  # batch_safety_checker (WAN only)
+                    gr.update(visible=False)   # batch_prompt_expansion (WAN only)
+                )
+            else:  # WAN (Default)
+                return (
+                    gr.update(visible=True),   # batch_wan_resolution
+                    gr.update(visible=False),  # batch_pixverse_resolution
+                    gr.update(visible=False),  # batch_luma_resolution
+                    gr.update(visible=False),  # batch_kling_resolution
+                    gr.update(visible=False),  # batch_pixverse_options
+                    gr.update(visible=False),  # batch_luma_options
+                    gr.update(visible=False),  # batch_kling_options
+                    gr.update(visible=True),   # batch_inference_steps (WAN only)
+                    gr.update(visible=True),   # batch_safety_checker (WAN only)
+                    gr.update(visible=True)    # batch_prompt_expansion (WAN only)
+                )
+                
+        batch_model_type.change(
+            fn=update_batch_model_options,
+            inputs=[batch_model_type],
+            outputs=[
+                batch_wan_resolution, batch_pixverse_resolution, batch_luma_resolution, batch_kling_resolution,
+                batch_pixverse_options, batch_luma_options, batch_kling_options,
+                batch_inference_steps, batch_safety_checker, batch_prompt_expansion
+            ]
+        )
+
+        return iface
 
 def get_selected_model(model_type: str) -> str:
     """Convert UI model type to internal model name"""
@@ -1652,20 +2439,41 @@ def on_image_upload(img):
         logger.info("Performing structured image analysis...")
         analysis = openai_client.analyze_image_structured(temp_path)
         
-        # Generate scene vision based on all components
-        scene_vision_prompt = f"""
-        Create a comprehensive scene vision based on the following analysis:
+        # *** CRITICAL FIX: Handle OpenAI content policy violations gracefully ***
+        if analysis.get('_fallback', False):
+            logger.warning(f"🚨 Analysis fallback triggered: {analysis.get('_reason', 'Unknown reason')}")
+            
+            # For content policy violations, return manual entry prompts
+            fallback_message = "⚠️ OpenAI content policy prevented automatic analysis. Please fill in the fields manually."
+            
+            return (
+                "[Manual Entry Required]",
+                "[Please describe background manually]",
+                "[Please describe main subject manually]",
+                "[Please describe tone and color manually]",
+                "[Please enter action direction manually]",
+                "[Please enter scene vision manually]",
+                fallback_message
+            )
         
-        Theme: {analysis['theme']}
-        Background: {analysis['background']}
-        Main Subject: {analysis['main_subject']}
-        Tone and Color: {analysis['tone_and_color']}
-        Action Direction: {analysis['action_direction']}
-        
-        Focus primarily on the main subject while maintaining the background elements, theme, and visual tone described.
-        """
-        
-        vision = openai_client.generate_scene_vision(scene_vision_prompt, analysis['main_subject'])
+        # Generate scene vision based on all components (only if analysis succeeded)
+        try:
+            scene_vision_prompt = f"""
+            Create a comprehensive scene vision based on the following analysis:
+            
+            Theme: {analysis['theme']}
+            Background: {analysis['background']}
+            Main Subject: {analysis['main_subject']}
+            Tone and Color: {analysis['tone_and_color']}
+            Action Direction: {analysis['action_direction']}
+            
+            Focus primarily on the main subject while maintaining the background elements, theme, and visual tone described.
+            """
+            
+            vision = openai_client.generate_scene_vision(scene_vision_prompt, analysis['main_subject'])
+        except Exception as e:
+            logger.warning(f"Scene vision generation failed: {str(e)}, using fallback")
+            vision = "[Please enter scene vision manually - automatic generation failed]"
 
         logger.info(f"Theme: {analysis['theme']}")
         logger.info(f"Background: {analysis['background']}")

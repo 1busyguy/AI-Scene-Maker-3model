@@ -45,6 +45,12 @@ def image_to_text(image_path):
         
         # Extract the description from the response
         description = response.choices[0].message.content
+        
+        # *** CRITICAL FIX: Handle OpenAI content policy rejections ***
+        if description is None:
+            logger.warning("🚨 OpenAI content policy rejection: Image description blocked")
+            return "[Content policy violation - using fallback description]"
+        
         logger.info(f"Got image description: {description[:50]}...")
         return description
     except Exception as e:
@@ -351,6 +357,12 @@ def analyze_image_structured(image_path):
         import json
         # Parse the response as JSON
         content = response.choices[0].message.content
+        
+        # *** CRITICAL FIX: Handle OpenAI content policy rejections ***
+        if content is None:
+            logger.warning("🚨 OpenAI content policy rejection: Image analysis blocked")
+            return _create_fallback_analysis("Content policy violation - manual entry required")
+        
         logger.info(f"Raw analysis response: {content[:100]}...")  # Log the first 100 chars for debugging
         
         analysis = json.loads(content)
@@ -372,6 +384,11 @@ def analyze_image_structured(image_path):
         logger.warning(f"Failed to parse JSON: {str(e)}")
         content = response.choices[0].message.content
         
+        # *** CRITICAL FIX: Handle content policy rejection in JSON parsing ***
+        if content is None:
+            logger.warning("🚨 OpenAI content policy rejection during JSON parsing")
+            return _create_fallback_analysis("Content policy violation - manual entry required")
+        
         # Fallback extraction method
         analysis = {
             "theme": extract_field(content, "Theme"),
@@ -386,3 +403,31 @@ def analyze_image_structured(image_path):
             logger.info(f"{key}: {value}")
             
         return analysis
+    
+    except Exception as e:
+        # *** CRITICAL FIX: Handle all other OpenAI API errors ***
+        logger.warning(f"🚨 OpenAI API error during image analysis: {str(e)}")
+        return _create_fallback_analysis(f"API error - manual entry required: {str(e)}")
+
+def _create_fallback_analysis(reason: str) -> dict:
+    """
+    Create a fallback analysis structure when OpenAI analysis fails.
+    This allows the application to continue with manual entry.
+    
+    Args:
+        reason: Reason for the fallback
+        
+    Returns:
+        dict: Fallback analysis structure with clear indicators for manual entry
+    """
+    logger.info(f"Creating fallback analysis: {reason}")
+    
+    return {
+        "theme": f"[MANUAL ENTRY REQUIRED] - {reason}",
+        "background": "[Please describe the background elements manually]",
+        "main_subject": "[Please describe the main subject manually]", 
+        "tone_and_color": "[Please describe the tone and color manually]",
+        "action_direction": "[Please enter the desired action direction manually]",
+        "_fallback": True,  # Flag to indicate this is a fallback response
+        "_reason": reason   # Store the reason for debugging
+    }
