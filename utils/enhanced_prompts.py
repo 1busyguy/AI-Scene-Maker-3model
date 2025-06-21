@@ -23,7 +23,7 @@ class ModernEnhancedPromptGenerator:
     Modern prompt generator using LangChain LCEL instead of deprecated LLMChain
     """
     
-    def __init__(self, model_name: str = "gpt-4o-mini", temperature: float = 0.7):
+    def __init__(self, model_name: str = "gpt-4o", temperature: float = 0.7):
         """
         Initialize with modern LangChain components
         

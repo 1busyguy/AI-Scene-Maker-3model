@@ -1597,7 +1597,7 @@ def create_ui():
                     """
                     
                     response = openai_client.client.chat.completions.create(
-                        model="gpt-4.1-mini",
+                        model="gpt-4o",
                         messages=[{"role": "user", "content": content_prompt}],
                         max_tokens=150,
                         temperature=0.8

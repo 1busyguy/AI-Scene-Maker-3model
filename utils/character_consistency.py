@@ -375,7 +375,7 @@ class CharacterConsistencyManager:
             
             # Get detailed description from OpenAI with custom prompt
             response = client.chat.completions.create(
-                model="gpt-4.1-mini",
+                model="gpt-4o",
                 messages=[
                     {
                         "role": "user",

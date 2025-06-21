@@ -13,7 +13,7 @@ def encode_image_to_base64(image_path):
         return base64.b64encode(image_file.read()).decode('utf-8')
 
 def image_to_text(image_path):
-    """Get a description of an image using GPT-4.1-mini Vision API"""
+    """Get a description of an image using gpt-4o Vision API"""
     logger.info(f"Getting description for image: {image_path}")
     
     if not os.path.exists(image_path):
@@ -23,9 +23,9 @@ def image_to_text(image_path):
         # Encode the image to base64
         base64_image = encode_image_to_base64(image_path)
         
-        # Call the OpenAI API with the GPT-4.1-mini model
+        # Call the OpenAI API with the gpt-4o model
         response = client.chat.completions.create(
-            model="gpt-4.1-mini",  # Updated to use gpt-4o-mini
+            model="gpt-4o",  # Updated to use gpt-4o-mini
             messages=[
                 {
                     "role": "user",
@@ -61,7 +61,7 @@ def generate_scene_vision(action_direction, image_description):
     prompt = f"Combine the following into a cohesive scene vision:\nAction Direction: {action_direction}\nImage Description: {image_description}"
     try:
         completion = client.chat.completions.create(
-            model="gpt-4.1-mini",  # Updated to use gpt-4.1-mini
+            model="gpt-4o",  # Updated to use gpt-4o
             messages=[{"role": "user", "content": prompt}]
         )
         return completion.choices[0].message.content
@@ -98,7 +98,7 @@ def determine_optimal_chain_count(scene_vision, action_direction):
     
     try:
         completion = client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model="gpt-4o",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=10
         )
@@ -182,7 +182,7 @@ def create_chain_prompt(action_direction, scene_vision, last_frame_description, 
     
     try:
         completion = client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model="gpt-4o",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=100,
             temperature=0.7
@@ -236,7 +236,7 @@ def score_frame_consistency(frame_description, scene_vision, action_direction):
     
     try:
         completion = client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model="gpt-4o",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=10
         )
@@ -330,7 +330,7 @@ def analyze_image_structured(image_path):
     """
     
     response = client.chat.completions.create(
-        model="gpt-4.1-mini",
+        model="gpt-4o",
         messages=[
             {
                 "role": "system",
@@ -481,7 +481,7 @@ def generate_tiktok_template_content(image_path, video_prompt):
             """
             
             response = client.chat.completions.create(
-                model="gpt-4.1-mini",
+                model="gpt-4o",
                 messages=[{"role": "user", "content": content_prompt}],
                 max_tokens=200,
                 temperature=0.8
