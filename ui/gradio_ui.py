@@ -8,6 +8,8 @@ import numpy as np
 import cv2
 from utils import fal_client, openai_client, video_processing
 from utils.langchain_prompts import generate_cinematic_prompt
+from utils.character_consistency import CharacterConsistencyManager
+from utils.face_enhancement import FaceEnhancer
 from config import OUTPUT_DIR
 import config
 import json
@@ -295,6 +297,29 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
             if 'action_direction' in image_analysis and image_analysis['action_direction']:
                 image_analysis['action_direction'] = f"{image_analysis['action_direction']} (Note: Image was automatically adjusted: {', '.join(adjustments)})"
         
+        # Initialize optional enhancement/consistency tools
+        character_manager = None
+        face_enhancer = None
+        if enable_character_consistency:
+            yield "progress", 0.08, "Initializing character consistency..."
+            try:
+                character_manager = CharacterConsistencyManager(image_path, session_dir)
+                logger.info("Character consistency manager initialized")
+            except Exception as e:
+                logger.error(f"Failed to initialize character consistency: {str(e)}")
+                enable_character_consistency = False
+        if enable_face_enhancement:
+            yield "progress", 0.09, "Initializing face enhancement..."
+            try:
+                face_enhancer = FaceEnhancer()
+                enhanced_input = face_enhancer.enhance_face(image_path, light_mode=True)
+                if enhanced_input != image_path:
+                    image_path = enhanced_input
+                    logger.info("Input image face enhanced")
+            except Exception as e:
+                logger.error(f"Failed to initialize face enhancement: {str(e)}")
+                enable_face_enhancement = False
+
         # Get structured image analysis if any component is missing
         yield "progress", 0.1, "Analyzing image..."
         image_description = ""
@@ -573,6 +598,25 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                         else:
                             logger.warning(f"🔗 CHAIN {chain_number}: Trimmed video not available, using original")
                         
+                        # Optional face enhancement and validation
+                        if enable_face_enhancement and face_enhancer:
+                            try:
+                                yield "progress", base_progress + step_size * 0.82, "Enhancing frame..."
+                                enhanced_frame = face_enhancer.enhance_face(best_frame_path, light_mode=True)
+                                if enhanced_frame != best_frame_path:
+                                    best_frame_path = enhanced_frame
+                                    logger.info("Frame face enhanced")
+                            except Exception as e:
+                                logger.warning(f"Face enhancement failed: {str(e)}")
+
+                        if enable_character_consistency and character_manager:
+                            try:
+                                score, _ = character_manager.validate_character_consistency(best_frame_path)
+                                logger.info(f"Character consistency score: {score:.2f}")
+                                yield "progress", base_progress + step_size * 0.83, f"Consistency {score:.2f}"
+                            except Exception as e:
+                                logger.warning(f"Consistency check failed: {str(e)}")
+
                         # Get structured analysis of the best frame for continuity
                         try:
                             yield "progress", base_progress + step_size * 0.9, "Analyzing frame for continuity..."
@@ -694,7 +738,13 @@ def start_chain_generation_with_updates(action_direction, image, theme=None, bac
                 else:
                     yield "error", None, f"Error in first chain: {error_msg}"
                     return
-        
+         # Optional character consistency report
+        if enable_character_consistency and character_manager:
+            try:
+                yield "progress", 0.94, "Creating consistency report..."
+                character_manager.create_validation_report(video_paths)
+            except Exception as e:
+                logger.warning(f"Consistency report failed: {str(e)}")
         # Stitch videos together
         yield "progress", 0.95, "Stitching videos together..."
         try:
